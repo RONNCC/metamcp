@@ -263,6 +263,35 @@ const createPoolGuardedFetch = (): FetchLike =>
     refuseCrossOriginRedirect: true,
   });
 
+// Servers parked awaiting interactive browser OAuth consent (e.g. an
+// `mcp-remote` STDIO process that printed "authorize this client" and is
+// sitting on its localhost callback). While parked, the pool must NOT kill
+// the waiting process or spawn a replacement: every fresh process mints a
+// new PKCE challenge that invalidates the consent page the user may already
+// have open. The pool drains this latch on failed connects and skips
+// createIdleSession while set; it clears on success or explicit reconnect.
+export const oauthAwaitingAuth = new Set<string>();
+
+// Bounded per-server stderr tail, fed by the STDIO data handler below and
+// consumed by the connect catch to classify OAuth-wait. Cap keeps a chatty
+// subprocess from growing memory while retaining the authorize lines.
+const oauthStderrTail = new Map<string, string>();
+const STDERR_TAIL_MAX = 4096;
+
+// Matches the browser-consent wait state printed by `mcp-remote` (and
+// compatible OAuth shim CLIs) on stderr. Deliberately narrow: a generic
+// ECONNREFUSED/exit-code failure must keep the normal retry path.
+const OAUTH_WAIT_PATTERNS = [
+  /authorize this client/i,
+  /paste the .*url.*into your browser/i,
+  /waiting for authorization/i,
+  /oauth.*callback.*listening on/i,
+];
+
+export function isOAuthAwaitingAuthStderr(text: string): boolean {
+  return OAUTH_WAIT_PATTERNS.some((re) => re.test(text));
+}
+
 export const createMetaMcpClient = (
   serverParams: ServerParameters,
 ): { client: Client | undefined; transport: Transport | undefined } => {
@@ -289,10 +318,17 @@ export const createMetaMcpClient = (
       const stderrStream = (transport as ProcessManagedStdioTransport).stderr;
 
       stderrStream?.on("data", (chunk: Buffer) => {
+        const text = chunk.toString();
+        // Feed the OAuth-wait classifier buffer (bounded tail).
+        const prev = oauthStderrTail.get(serverParams.uuid) ?? "";
+        oauthStderrTail.set(
+          serverParams.uuid,
+          (prev + text).slice(-STDERR_TAIL_MAX),
+        );
         metamcpLogStore.addLog(
           serverParams.name,
           "error",
-          chunk.toString().trim(),
+          text.trim(),
         );
       });
 
@@ -784,6 +820,30 @@ export const connectMetaMcpClient = async (
           message: `Connect attempt ${count + 1}/${maxAttempts} failed — ${describeConnectError(error)}`,
           error,
         });
+      }
+
+      // OAuth-wait park: an STDIO subprocess (mcp-remote) that printed
+      // browser-consent instructions is NOT a failed backend — it is
+      // waiting on the user. Killing it here (and respawning on the next
+      // sweep tick) rotates the PKCE challenge and invalidates the consent
+      // page faster than anyone can click through. Leave the process alive,
+      // latch the uuid so the pool stops recreating it, and return without
+      // counting a retry. Cleared on next success or explicit reconnect.
+      // Fixes the atlassian-rovo infinite 60s re-auth loop.
+      const isStdioServerType =
+        !serverParams.type || serverParams.type === "STDIO";
+      if (isStdioServerType) {
+        const tail = oauthStderrTail.get(serverParams.uuid) ?? "";
+        if (tail && isOAuthAwaitingAuthStderr(tail)) {
+          oauthAwaitingAuth.add(serverParams.uuid);
+          logger.info(
+            `[oauth] ${serverParams.name} (${serverParams.uuid}) awaiting browser consent — parking connect loop, leaving subprocess alive`,
+          );
+          return undefined;
+        }
+        // Not an OAuth wait: drop the tail so a stale authorize line from
+        // an earlier incarnation can't park a genuinely dead process later.
+        oauthStderrTail.delete(serverParams.uuid);
       }
 
       // CRITICAL FIX: Clean up transport/process on connection failure
