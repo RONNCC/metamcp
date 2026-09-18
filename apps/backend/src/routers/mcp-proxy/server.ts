@@ -23,7 +23,11 @@ import {
 } from "@/lib/metamcp/url-guard";
 import logger from "@/utils/logger";
 
-import { mcpServersRepository } from "../../db/repositories";
+import {
+  mcpServersRepository,
+  namespaceMappingsRepository,
+} from "../../db/repositories";
+import { metaMcpServerPool } from "../../lib/metamcp/metamcp-server-pool";
 import mcpProxy from "../../lib/mcp-proxy";
 import { transformDockerUrl } from "../../lib/metamcp/client";
 import { mcpServerPool } from "../../lib/metamcp/mcp-server-pool";
@@ -32,6 +36,26 @@ import {
   resolveEnvVariables,
 } from "../../lib/metamcp/utils";
 import { ProcessManagedStdioTransport } from "../../lib/stdio-transport/process-managed-transport";
+
+async function markServerHealthy(serverUuid: string): Promise<void> {
+  try {
+    await mcpServerPool.resetServerErrorState(serverUuid);
+    const affectedNamespaceUuids =
+      await namespaceMappingsRepository.findNamespacesByServerUuid(serverUuid);
+    if (affectedNamespaceUuids.length > 0) {
+      await Promise.allSettled([
+        metaMcpServerPool.invalidateIdleServers(affectedNamespaceUuids),
+        metaMcpServerPool.invalidateOpenApiSessions(affectedNamespaceUuids),
+      ]);
+    }
+    logger.info(`Propagated healthy status for server ${serverUuid}`);
+  } catch (error) {
+    logger.error(
+      `Error propagating healthy status for server ${serverUuid}:`,
+      error,
+    );
+  }
+}
 
 // `x-mcp-actor` is best-effort, client-asserted attribution: it names who an
 // action is on behalf of so backend MCPs (shell-broker, ninja, inventory) can
@@ -452,6 +476,8 @@ const createTransport = async (req: express.Request): Promise<Transport> => {
   );
 
   const transportType = query.transportType as string;
+  const isExplicitReconnect =
+    req.query.reconnect === "true" || req.query.probe === "true";
 
   if (transportType === McpServerTypeEnum.enum.STDIO) {
     // Command, args and env come from the `mcp_servers` row and nowhere else.
@@ -476,7 +502,10 @@ const createTransport = async (req: express.Request): Promise<Transport> => {
 
     // Check if the server is in error state. Read off the row already loaded
     // above rather than re-fetching it by uuid.
-    if (spawnParams.errorStatus === McpServerErrorStatusEnum.enum.ERROR) {
+    if (
+      spawnParams.errorStatus === McpServerErrorStatusEnum.enum.ERROR &&
+      !isExplicitReconnect
+    ) {
       logger.info(
         `Server ${spawnParams.serverName} (${spawnParams.serverUuid}) is in ERROR state`,
       );
@@ -498,6 +527,9 @@ const createTransport = async (req: express.Request): Promise<Transport> => {
 
     try {
       await transport.start();
+      if (spawnParams.serverUuid) {
+        await markServerHealthy(spawnParams.serverUuid);
+      }
       return transport;
     } catch (error) {
       // If the transport fails to start, put it in cooldown
@@ -528,8 +560,10 @@ const createTransport = async (req: express.Request): Promise<Transport> => {
 
     // Error state is read off the row already loaded rather than re-fetched by
     // uuid: the re-fetch was a second, UNSCOPED lookup of a row we are already
-    // holding, which is the exact call this fix exists to remove from the path.
-    if (matchingServer?.error_status === McpServerErrorStatusEnum.enum.ERROR) {
+    if (
+      matchingServer?.error_status === McpServerErrorStatusEnum.enum.ERROR &&
+      !isExplicitReconnect
+    ) {
       logger.info(
         `Server ${matchingServer.name} (${matchingServer.uuid}) is in ERROR state`,
       );
@@ -589,6 +623,9 @@ const createTransport = async (req: express.Request): Promise<Transport> => {
       fetch: guardedFetch,
     });
     await transport.start();
+    if (matchingServer?.uuid) {
+      await markServerHealthy(matchingServer.uuid);
+    }
     return transport;
   } else if (transportType === McpServerTypeEnum.enum.STREAMABLE_HTTP) {
     const url = transformDockerUrl(query.url as string);
@@ -604,7 +641,10 @@ const createTransport = async (req: express.Request): Promise<Transport> => {
       url,
     );
 
-    if (matchingServer?.error_status === McpServerErrorStatusEnum.enum.ERROR) {
+    if (
+      matchingServer?.error_status === McpServerErrorStatusEnum.enum.ERROR &&
+      !isExplicitReconnect
+    ) {
       logger.info(
         `Server ${matchingServer.name} (${matchingServer.uuid}) is in ERROR state`,
       );
@@ -628,6 +668,9 @@ const createTransport = async (req: express.Request): Promise<Transport> => {
       fetch: createGuardedFetch({ allowlistOrigin: target.url.origin }),
     });
     await transport.start();
+    if (matchingServer?.uuid) {
+      await markServerHealthy(matchingServer.uuid);
+    }
     return transport;
   } else {
     logger.error(`Invalid transport type: ${transportType}`);

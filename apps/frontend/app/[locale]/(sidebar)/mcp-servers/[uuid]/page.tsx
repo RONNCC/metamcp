@@ -11,6 +11,7 @@ import {
   Eye,
   EyeOff,
   Plug,
+  RefreshCw,
   SearchCode,
   Server,
 } from "lucide-react";
@@ -134,6 +135,27 @@ export default function McpServerDetailPage({
       setShowDeleteDialog(false);
     },
   });
+  // tRPC mutation for reconnecting server and clearing errors
+  const reconnectMutation = trpc.frontend.mcpServers.reconnect.useMutation({
+    onSuccess: (response) => {
+      if (response.success) {
+        toast.success(t("mcp-servers:tools.reconnectSuccess"));
+        refetch();
+        utils.frontend.mcpServers.list.invalidate();
+        utils.frontend.namespaces.list.invalidate();
+        connection.connect();
+      } else {
+        toast.error(response.error || t("mcp-servers:tools.reconnectError"), {
+          description: response.message,
+        });
+      }
+    },
+    onError: (error) => {
+      toast.error(t("mcp-servers:tools.reconnectError"), {
+        description: error.message,
+      });
+    },
+  });
 
   const server: McpServer | undefined = serverResponse?.success
     ? serverResponse.data
@@ -185,17 +207,26 @@ export default function McpServerDetailPage({
     // Toast is handled by the EditMcpServer component
   };
 
+  // When client connection becomes connected, ensure error state reflects accurately
+  useEffect(() => {
+    if (
+      connection.connectionStatus === "connected" &&
+      server?.error_status === McpServerErrorStatusEnum.enum.ERROR
+    ) {
+      refetch();
+    }
+  }, [connection.connectionStatus, server?.error_status, refetch]);
+
   // Handle manual connect/disconnect
   const handleConnectionToggle = () => {
-    if (server?.error_status === McpServerErrorStatusEnum.enum.ERROR) {
-      // Don't allow connection if server is in error state
+    if (
+      server?.error_status === McpServerErrorStatusEnum.enum.ERROR ||
+      connection.connectionStatus === "connected"
+    ) {
+      reconnectMutation.mutate({ uuid });
       return;
     }
-    if (connection.connectionStatus === "connected") {
-      connection.disconnect();
-    } else {
-      connection.connect();
-    }
+    connection.connect();
   };
 
   // Get connection status display info
@@ -446,12 +477,24 @@ export default function McpServerDetailPage({
                   variant="outline"
                   size="sm"
                   onClick={handleConnectionToggle}
-                  disabled={connection.connectionStatus === "connecting"}
+                  disabled={
+                    connection.connectionStatus === "connecting" ||
+                    reconnectMutation.isPending
+                  }
                   className="whitespace-nowrap flex-shrink-0"
                 >
-                  {connection.connectionStatus === "connected"
-                    ? t("mcp-servers:detail.reconnect")
-                    : t("mcp-servers:detail.connect")}
+                  {reconnectMutation.isPending ? (
+                    <>
+                      <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
+                      {t("mcp-servers:tools.reconnecting")}
+                    </>
+                  ) : server?.error_status ===
+                      McpServerErrorStatusEnum.enum.ERROR ||
+                    connection.connectionStatus === "connected" ? (
+                    t("mcp-servers:detail.reconnect")
+                  ) : (
+                    t("mcp-servers:detail.connect")
+                  )}
                 </Button>
               </div>
             )}
@@ -706,6 +749,21 @@ export default function McpServerDetailPage({
                     <p className="mt-1 text-xs text-muted-foreground">
                       {t("mcp-servers:detail.fixServerErrorToManageTools")}
                     </p>
+                    <Button
+                      onClick={() => reconnectMutation.mutate({ uuid })}
+                      disabled={reconnectMutation.isPending}
+                      className="mt-4"
+                      size="sm"
+                    >
+                      <RefreshCw
+                        className={`h-4 w-4 mr-2 ${
+                          reconnectMutation.isPending ? "animate-spin" : ""
+                        }`}
+                      />
+                      {reconnectMutation.isPending
+                        ? t("mcp-servers:tools.reconnecting")
+                        : t("mcp-servers:detail.reconnect")}
+                    </Button>
                   </div>
                 </div>
               </div>

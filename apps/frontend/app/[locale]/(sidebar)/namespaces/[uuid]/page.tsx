@@ -1,6 +1,6 @@
 "use client";
 
-import { McpServerTypeEnum } from "@repo/zod-types";
+import { McpServerErrorStatusEnum, McpServerTypeEnum } from "@repo/zod-types";
 import { ArrowLeft, Calendar, Edit, Hash, Plug, Server } from "lucide-react";
 import Link from "next/link";
 import { notFound, useRouter } from "next/navigation";
@@ -83,6 +83,8 @@ export default function NamespaceDetailPage({
       setShowDeleteDialog(false);
     },
   });
+  // tRPC mutation for reconnecting server and clearing errors
+  const reconnectMutation = trpc.frontend.mcpServers.reconnect.useMutation();
 
   const namespace = namespaceResponse?.success
     ? namespaceResponse.data
@@ -135,9 +137,25 @@ export default function NamespaceDetailPage({
   };
 
   // Handle manual connect/disconnect
-  const handleConnectionToggle = () => {
+  // Handle manual connect/disconnect/reconnect
+  const handleConnectionToggle = async () => {
     if (connection.connectionStatus === "connected") {
-      connection.disconnect();
+      // Reconnect clicked while connected: heal any error servers in this namespace first
+      const errorServers =
+        namespace?.servers?.filter(
+          (s) => s.error_status === McpServerErrorStatusEnum.enum.ERROR,
+        ) || [];
+
+      if (errorServers.length > 0) {
+        await Promise.allSettled(
+          errorServers.map((s) =>
+            reconnectMutation.mutateAsync({ uuid: s.uuid }),
+          ),
+        );
+        utils.frontend.namespaces.get.invalidate({ uuid });
+      }
+
+      handleConnectionRefresh();
     } else {
       connection.connect();
     }

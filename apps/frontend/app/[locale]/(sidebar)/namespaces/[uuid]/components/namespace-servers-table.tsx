@@ -21,6 +21,7 @@ import {
   Eye,
   FileText,
   MoreHorizontal,
+  RefreshCw,
   Search,
   Server,
 } from "lucide-react";
@@ -78,6 +79,26 @@ export function NamespaceServersTable({
   const utils = trpc.useUtils();
 
   // TRPC mutation for updating server status
+  // TRPC mutation for reconnecting server and clearing errors
+  const reconnectMutation = trpc.frontend.mcpServers.reconnect.useMutation({
+    onSuccess: (response) => {
+      if (response.success) {
+        toast.success(t("mcp-servers:tools.reconnectSuccess"));
+        utils.frontend.namespaces.get.invalidate({ uuid: namespaceUuid });
+        utils.frontend.mcpServers.list.invalidate();
+      } else {
+        toast.error(response.error || t("mcp-servers:tools.reconnectError"), {
+          description: response.message,
+        });
+      }
+    },
+    onError: (error) => {
+      toast.error(t("mcp-servers:tools.reconnectError"), {
+        description: error.message,
+      });
+    },
+  });
+
   const updateServerStatusMutation =
     trpc.frontend.namespaces.updateServerStatus.useMutation({
       onSuccess: (data) => {
@@ -278,12 +299,37 @@ export function NamespaceServersTable({
       cell: ({ row }) => {
         const errorStatus = row.getValue("error_status") as string;
         const hasError = errorStatus === McpServerErrorStatusEnum.enum.ERROR;
+        const server = row.original;
+        const isReconnecting =
+          reconnectMutation.isPending &&
+          reconnectMutation.variables?.uuid === server.uuid;
+
         return (
           <div className="px-3 py-2">
-            <Badge variant={hasError ? "destructive" : "success"}>
-              {hasError
-                ? t("namespaces:serversTable.error")
-                : t("namespaces:serversTable.noError")}
+            <Badge
+              variant={hasError ? "destructive" : "success"}
+              className={
+                hasError
+                  ? "cursor-pointer hover:opacity-80 transition-opacity select-none"
+                  : ""
+              }
+              onClick={
+                hasError && !isReconnecting
+                  ? () => reconnectMutation.mutate({ uuid: server.uuid })
+                  : undefined
+              }
+              title={hasError ? "Click to retry / reconnect server" : undefined}
+            >
+              {hasError ? (
+                <span className="flex items-center gap-1">
+                  <RefreshCw
+                    className={`h-3 w-3 ${isReconnecting ? "animate-spin" : ""}`}
+                  />
+                  {t("namespaces:serversTable.error")}
+                </span>
+              ) : (
+                t("namespaces:serversTable.noError")
+              )}
             </Badge>
           </div>
         );
@@ -427,6 +473,20 @@ export function NamespaceServersTable({
               <DropdownMenuItem onClick={handleViewDetails}>
                 <Eye className="mr-2 h-4 w-4" />
                 {t("namespaces:serversTable.viewDetails")}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onClick={() => reconnectMutation.mutate({ uuid: server.uuid })}
+                disabled={reconnectMutation.isPending}
+              >
+                <RefreshCw
+                  className={`mr-2 h-4 w-4 ${
+                    reconnectMutation.isPending &&
+                    reconnectMutation.variables?.uuid === server.uuid
+                      ? "animate-spin"
+                      : ""
+                  }`}
+                />
+                {t("mcp-servers:detail.reconnect")}
               </DropdownMenuItem>
               <DropdownMenuItem asChild>
                 <Link

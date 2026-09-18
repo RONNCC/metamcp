@@ -501,6 +501,15 @@ describe("remote transports — whose row may supply the stored headers", () => 
 
     expect(sseClientConstructions).toEqual([]);
   });
+  it("allows connect and marks server healthy when reconnect=true is passed for an ERROR row", async () => {
+    findAllAccessibleToUserMock.mockResolvedValue([
+      { ...estate[0], error_status: "ERROR" },
+    ]);
+
+    await getSse({ transportType: "SSE", url: OWN_URL, reconnect: "true" });
+
+    expect(sseClientConstructions).toHaveLength(1);
+  });
 
   it("ignores an ERROR marking on a row the caller cannot see", async () => {
     // The other side of the same coin: another user's row must not be able to
