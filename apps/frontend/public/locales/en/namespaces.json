@@ -178,7 +178,8 @@
     "toggleTooFastDescription": "Please wait before toggling this server again to prevent conflicts.",
     "errorStatus": "Error Status",
     "error": "Error",
-    "noError": "No Error"
+    "noError": "No Error",
+    "clickToReconnect": "Click to retry / reconnect server"
   },
   "toolManagement": {
     "toolsOverview": "Tools Overview:",

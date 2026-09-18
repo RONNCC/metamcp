@@ -66,6 +66,7 @@ interface UseConnectionOptions {
   isMetaMCP?: boolean;
   includeInactiveServers?: boolean;
   enabled?: boolean; // Skip hook execution when false
+  isReconnect?: boolean;
 }
 
 export function useConnection({
@@ -83,6 +84,7 @@ export function useConnection({
   isMetaMCP = false,
   includeInactiveServers = false,
   enabled = true,
+  isReconnect = false,
 }: UseConnectionOptions) {
   const authProvider = createAuthProvider(mcpServerUuid, url);
   const [connectionStatus, setConnectionStatus] =
@@ -433,6 +435,9 @@ export function useConnection({
               );
               mcpProxyServerUrl.searchParams.append("command", command);
               mcpProxyServerUrl.searchParams.append("args", args);
+              if (isReconnect) {
+                mcpProxyServerUrl.searchParams.append("reconnect", "true");
+              }
               transportOptions = {
                 authProvider: authProvider,
                 eventSourceInit: {
@@ -463,6 +468,9 @@ export function useConnection({
             case McpServerTypeEnum.enum.SSE:
               mcpProxyServerUrl = new URL(`/mcp-proxy/server/sse`, getAppUrl());
               mcpProxyServerUrl.searchParams.append("url", url);
+              if (isReconnect) {
+                mcpProxyServerUrl.searchParams.append("reconnect", "true");
+              }
               transportOptions = {
                 eventSourceInit: {
                   fetch: (
@@ -492,6 +500,9 @@ export function useConnection({
             case McpServerTypeEnum.enum.STREAMABLE_HTTP:
               mcpProxyServerUrl = new URL(`/mcp-proxy/server/mcp`, getAppUrl());
               mcpProxyServerUrl.searchParams.append("url", url);
+              if (isReconnect) {
+                mcpProxyServerUrl.searchParams.append("reconnect", "true");
+              }
               transportOptions = {
                 authProvider: authProvider,
                 eventSourceInit: {

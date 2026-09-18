@@ -178,7 +178,8 @@
     "toggleTooFastDescription": "Por favor, aguarde antes de alternar este server novamente para evitar conflitos.",
     "errorStatus": "Status de Erro",
     "error": "Erro",
-    "noError": "Sem Erro"
+    "noError": "Sem Erro",
+    "clickToReconnect": "Clique para tentar novamente / reconectar servidor"
   },
   "toolManagement": {
     "toolsOverview": "Visão Geral das Tools:",

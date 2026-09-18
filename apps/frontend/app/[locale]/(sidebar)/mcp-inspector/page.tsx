@@ -38,6 +38,7 @@ function McpInspectorContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
 
+  const utils = trpc.useUtils();
   // Get selectedServerUuid directly from search params
   const selectedServerUuid = searchParams.get("server") || "";
 
@@ -98,7 +99,17 @@ function McpInspectorContent() {
     onNotification,
     onStdErrNotification,
     enabled: Boolean(selectedServer && !serversLoading && selectedServerUuid),
+    isReconnect: true,
   });
+
+  // When inspector connects successfully, invalidate server queries so happy state propagates
+  React.useEffect(() => {
+    if (connection.connectionStatus === "connected" && selectedServerUuid) {
+      utils.frontend.mcpServers.get.invalidate({ uuid: selectedServerUuid });
+      utils.frontend.mcpServers.list.invalidate();
+      utils.frontend.namespaces.list.invalidate();
+    }
+  }, [connection.connectionStatus, selectedServerUuid, utils]);
 
   // Handle server connection logic and notifications
   React.useEffect(() => {

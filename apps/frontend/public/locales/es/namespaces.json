@@ -178,7 +178,8 @@
     "toggleTooFastDescription": "Por favor, espere antes de cambiar este server nuevamente para evitar conflictos.",
     "errorStatus": "Estado de Error",
     "error": "Error",
-    "noError": "Sin Error"
+    "noError": "Sin Error",
+    "clickToReconnect": "Haga clic para reintentar / reconectar servidor"
   },
   "toolManagement": {
     "toolsOverview": "Resumen de Tools:",

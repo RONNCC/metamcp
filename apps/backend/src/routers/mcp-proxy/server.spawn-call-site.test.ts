@@ -305,6 +305,19 @@ describe("GET /mcp-proxy/server/stdio — what reaches the transport", () => {
 
     expect(spawnCalls).toEqual([]);
   });
+  it("allows spawn and marks server healthy when reconnect=true is passed for an ERROR row", async () => {
+    findAllAccessibleToUserMock.mockResolvedValue([
+      registeredServer({ error_status: "ERROR" }),
+    ]);
+
+    await getStdio({
+      transportType: "STDIO",
+      mcpServerUuid: SERVER_UUID,
+      reconnect: "true",
+    });
+
+    expect(spawnCalls).toHaveLength(1);
+  });
 
   it("does NOT leak the gateway's own process.env secrets into the child env", async () => {
     // The Inspector used to spread the whole gateway process.env into the
