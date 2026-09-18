@@ -280,20 +280,27 @@ export function useConnection({
     }
   });
 
-  const is401Error = useMemoizedFn((error: unknown): boolean => {
+  const isAuthError = useMemoizedFn((error: unknown): boolean => {
+    // OAuth-required: Slack-style Streamable-HTTP missing_token (-32001 + substring).
+    // Narrow: code match alone insufficient, other -32001 are real failures.
+    const msg = error instanceof Error ? error.message : "";
+    if (msg.includes("missing_token")) return true;
     return Boolean(
       (error instanceof SseError && error.code === 401) ||
-        (error instanceof Error && error.message.includes("401")) ||
-        (error instanceof Error && error.message.includes("Unauthorized")) ||
+        msg.includes("401") ||
+        msg.includes("Unauthorized") ||
         // Handle fetch errors that might come from streamable HTTP
         (error instanceof TypeError && error.message.includes("401")) ||
         // Handle response errors
-        (error &&
-          typeof error === "object" &&
+        (typeof error === "object" &&
+          error !== null &&
           "status" in error &&
-          (error as { status: number }).status === 401),
+          error.status === 401),
     );
   });
+
+  // Back-compat alias: existing callers use is401Error name.
+  const is401Error = isAuthError;
 
   const isProxyAuthError = useMemoizedFn((error: unknown): boolean => {
     return (
