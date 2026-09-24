@@ -15,6 +15,7 @@ import {
 import { convergeServerBearerTokens } from "./lib/metamcp/server-bearer-converge";
 import { autoNukeStaleSessions } from "./lib/metamcp/session-auto-nuke";
 import { warnIfGatewayBackendSecretUnset } from "./lib/metamcp/url-guard";
+import { startOAuthLoopbackForwarders } from "./lib/oauth-loopback-forwarder";
 import { initializeIdleServers, initializeOnStartup } from "./lib/startup";
 import { auditContextMiddleware } from "./middleware/audit-context.middleware";
 import { authSigninRateLimitMiddleware } from "./middleware/auth-signin-rate-limit.middleware";
@@ -196,6 +197,10 @@ async function start(): Promise<void> {
   // so it runs here after initializeOnStartup(); the live per-request hook in
   // auth.ts is the enforcement point either way.
   await logBasicAuthEnforcementState();
+
+  // Dedicated loopback listeners for OAuth providers with no dynamic
+  // client registration (see ./lib/oauth-loopback-forwarder for why).
+  startOAuthLoopbackForwarders();
 
   app.listen(12009, async () => {
     console.log(`Server is running on port 12009`);

@@ -46,8 +46,8 @@ import {
   Notification,
   StdErrNotificationSchema,
 } from "../lib/notificationTypes";
-import { createAuthProvider } from "../lib/oauth-provider";
-import { trpc } from "../lib/trpc";
+import { createAuthProvider, createProxiedFetch } from "../lib/oauth-provider";
+import { trpc, vanillaTrpcClient } from "../lib/trpc";
 
 interface UseConnectionOptions {
   mcpServerUuid: string;
@@ -282,20 +282,51 @@ export function useConnection({
     }
   });
 
-  const is401Error = useMemoizedFn((error: unknown): boolean => {
+  const isAuthError = useMemoizedFn((error: unknown): boolean => {
+    // OAuth-required: Slack-style Streamable-HTTP missing_token (-32001 + substring).
+    // Narrow: code match alone insufficient, other -32001 are real failures.
+    let msg = "";
+    if (error instanceof Error) {
+      msg = error.message;
+    } else if (
+      error !== null &&
+      typeof error === "object" &&
+      "message" in error &&
+      typeof error.message === "string"
+    ) {
+      msg = error.message;
+    }
+    const isMissingToken =
+      error !== null &&
+      typeof error === "object" &&
+      "code" in error &&
+      error.code === -32001 &&
+      msg.includes("missing_token");
+    if (isMissingToken) return true;
     return Boolean(
       (error instanceof SseError && error.code === 401) ||
-        (error instanceof Error && error.message.includes("401")) ||
-        (error instanceof Error && error.message.includes("Unauthorized")) ||
+        msg.includes("401") ||
+        msg.includes("Unauthorized") ||
+        // Upstream MCP errors only. The gateway's own session-cookie
+        // refusal ("No session cookies found" / "Invalid session") must
+        // NOT route here: that means the operator's MetaMCP login died,
+        // not that the upstream needs OAuth. Those texts never contain
+        // the upstream JSON-RPC shapes below.
+        (msg.includes("invalid_token") && msg.includes("error_description")) ||
+        (msg.includes("Authentication required") &&
+          msg.includes("error_description")) ||
         // Handle fetch errors that might come from streamable HTTP
         (error instanceof TypeError && error.message.includes("401")) ||
         // Handle response errors
-        (error &&
-          typeof error === "object" &&
+        (typeof error === "object" &&
+          error !== null &&
           "status" in error &&
-          (error as { status: number }).status === 401),
+          error.status === 401),
     );
   });
+
+  // Back-compat alias: existing callers use is401Error name.
+  const is401Error = isAuthError;
 
   const isProxyAuthError = useMemoizedFn((error: unknown): boolean => {
     return (
@@ -311,6 +342,7 @@ export function useConnection({
 
       const result = await auth(authProvider, {
         serverUrl: url || "",
+        fetchFn: createProxiedFetch(mcpServerUuid),
       });
       return result === "AUTHORIZED";
     }
@@ -610,8 +642,9 @@ export function useConnection({
             return connect(undefined, retryCount + 1);
           }
           if (is401Error(error)) {
-            // Don't set error state if we're about to redirect for auth
-
+            // Auth redirect started (or already in flight): the OAuth
+            // callback continues the flow. Hold here instead of throwing,
+            // or the outer catch toasts expired-token over the redirect.
             return;
           }
           throw error;
@@ -637,6 +670,67 @@ export function useConnection({
         setConnectionStatus("connected");
       } catch (e) {
         console.error(e);
+        // Include the class name: SDK OAuth failures arrive as typed errors
+        // (InvalidGrantError, InvalidClientError) whose message alone omits it.
+        const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+        const isDcrRefusal =
+          msg.includes("does not support dynamic client registration") ||
+          msg.includes("registration_not_supported") ||
+          (msg.toLowerCase().includes("regist") &&
+            (msg.includes("404") || msg.includes("405") || msg.includes("403")));
+        if (isDcrRefusal) {
+          toast.error("Server needs a static OAuth client ID", {
+            description:
+              "Edit server, paste the Slack app client ID, then Connect.",
+          });
+        } else if (
+          msg.includes("invalid_grant") ||
+          msg.includes("InvalidGrantError")
+        ) {
+          try {
+            authProvider.clear();
+          } catch {
+            // Clear is best-effort; the toast below carries the action.
+          }
+          try {
+            await vanillaTrpcClient.frontend.oauth.clear.mutate({
+              mcp_server_uuid: mcpServerUuid,
+            });
+          } catch {
+            // Best-effort: stale DB tokens stay until the next authorize.
+          }
+          toast.error("OAuth grant expired, reconnect to re-authorize");
+        } else if (
+          msg.includes("invalid_client") ||
+          msg.includes("InvalidClientError")
+        ) {
+          toast.error("OAuth client rejected, check the static client ID", {
+            description:
+              "Edit server, verify the OAuth client ID, then Connect.",
+          });
+        } else if (
+          msg.includes("invalid_token") ||
+          msg.includes("Token has expired")
+        ) {
+          // Stale upstream access token. Drop session + persisted tokens so
+          // the next Connect starts a fresh authorize instead of replaying
+          // the dead token through the Inspector transport.
+          try {
+            authProvider.clear();
+          } catch {
+            // Clear is best-effort; the toast below carries the action.
+          }
+          try {
+            await vanillaTrpcClient.frontend.oauth.clear.mutate({
+              mcp_server_uuid: mcpServerUuid,
+            });
+          } catch {
+            // Best-effort: stale DB tokens stay until the next authorize.
+          }
+          toast.error("Stored token expired, reconnect to re-authorize", {
+            description: "Old token cleared. Click Connect again to authorize.",
+          });
+        }
         setConnectionStatus("error");
       }
     },

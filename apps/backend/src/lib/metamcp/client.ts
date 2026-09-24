@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StdioServerParameters } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -28,6 +30,45 @@ import { serverErrorTracker } from "./server-error-tracker";
 import { createGuardedFetch } from "./url-guard";
 import { resolveEnvVariables } from "./utils";
 
+
+/**
+ * Resolves a Sierra session token dynamically from local session files
+ * mounted into the container (e.g. ~/.sierra/*.session or /sierra/*.session).
+ * Format of the session file is: `<org>:<token>`.
+ */
+export function resolveSierraSessionToken(): string | null {
+  const candidateDirs = [
+    path.join(process.env.HOME || "/home/nextjs", ".sierra"),
+    "/sierra",
+  ];
+
+  for (const dir of candidateDirs) {
+    try {
+      if (!fs.existsSync(dir)) continue;
+      const entries = fs.readdirSync(dir);
+      const sessionFiles = entries.filter((e) => e.endsWith(".session"));
+      const targetFile =
+        sessionFiles.find((f) => f.includes("docusign")) || sessionFiles[0];
+      if (!targetFile) continue;
+
+      const content = fs
+        .readFileSync(path.join(dir, targetFile), "utf8")
+        .trim();
+      if (!content) continue;
+
+      const colonIndex = content.indexOf(":");
+      const token =
+        colonIndex !== -1 ? content.slice(colonIndex + 1).trim() : content;
+      if (token) {
+        return token;
+      }
+    } catch (err) {
+      logger.warn(`Failed reading Sierra session file from ${dir}:`, err);
+    }
+  }
+
+  return null;
+}
 const sleep = (time: number) =>
   new Promise<void>((resolve) => setTimeout(() => resolve(), time));
 
@@ -363,6 +404,17 @@ export const createMetaMcpClient = (
       headers["Authorization"] = `Bearer ${authToken}`;
     }
 
+    if (
+      serverParams.name === "sierra" ||
+      Boolean(serverParams.headers?.["X-Sierra-Workspace-Id"]) ||
+      serverParams.url?.includes("sierra.ai")
+    ) {
+      const sierraSessionToken = resolveSierraSessionToken();
+      if (sierraSessionToken) {
+        headers["Authorization"] = `Bearer ${sierraSessionToken}`;
+      }
+    }
+
     // Every request this transport makes goes through the guarded, pinned
     // fetch, not just the initial GET: the SSE POST back-channel targets the
     // endpoint the REMOTE server advertises in its `endpoint` event, which is
@@ -401,6 +453,18 @@ export const createMetaMcpClient = (
       headers["Authorization"] = `Bearer ${authToken}`;
     }
 
+    const isSierra =
+      serverParams.name === "sierra" ||
+      Boolean(serverParams.headers?.["X-Sierra-Workspace-Id"]) ||
+      Boolean(serverParams.url?.includes("sierra.ai"));
+
+    if (isSierra) {
+      const sierraSessionToken = resolveSierraSessionToken();
+      if (sierraSessionToken) {
+        headers["Authorization"] = `Bearer ${sierraSessionToken}`;
+      }
+    }
+
     // Guarded, pinned outbound fetch (see createPoolGuardedFetch), covering
     // the transport's own reconnects and every redirect hop the one-shot
     // connect check cannot reach.
@@ -419,11 +483,24 @@ export const createMetaMcpClient = (
       guardedFetch,
     );
 
+    // Sierra's remote MCP endpoint does not support SSE GET streams and 302-redirects
+    // GET / across origins to sierra.ai, which trips cross-origin redirect refusal. Returning 405
+    // signals the MCP SDK that SSE GET is not offered so it operates cleanly in Streamable HTTP POST mode.
+    const baseFetch = injectedFetch ?? guardedFetch;
+    const effectiveFetch: FetchLike = isSierra
+      ? async (url, init) => {
+          if (init?.method === "GET") {
+            return new Response(null, { status: 405, statusText: "Method Not Allowed" });
+          }
+          return baseFetch(url, init);
+        }
+      : baseFetch;
+
     transport = new StreamableHTTPClientTransport(new URL(transformedUrl), {
       requestInit: {
         headers,
       },
-      fetch: injectedFetch ?? guardedFetch,
+      fetch: effectiveFetch,
     });
   } else {
     metamcpLogStore.addLog(

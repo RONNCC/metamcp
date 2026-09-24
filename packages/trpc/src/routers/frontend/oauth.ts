@@ -19,6 +19,9 @@ export const createOAuthRouter = (
     upsert: (
       input: z.infer<typeof UpsertOAuthSessionRequestSchema>,
     ) => Promise<z.infer<typeof UpsertOAuthSessionResponseSchema>>;
+    clear: (
+      input: z.infer<typeof GetOAuthSessionRequestSchema>,
+    ) => Promise<z.infer<typeof UpsertOAuthSessionResponseSchema>>;
   },
 ) => {
   return router({
@@ -45,6 +48,17 @@ export const createOAuthRouter = (
       .output(UpsertOAuthSessionResponseSchema)
       .mutation(async ({ input }) => {
         return await implementations.upsert(input);
+      }),
+
+    // Admin only: Clear stored tokens for a server, preserving
+    // client_information (static client IDs survive; DCR re-registers).
+    // The upsert path treats undefined as omit-do-not-touch, so it cannot
+    // clear; this is the real clear path for expired-grant recovery.
+    clear: adminProcedure
+      .input(GetOAuthSessionRequestSchema)
+      .output(UpsertOAuthSessionResponseSchema)
+      .mutation(async ({ input }) => {
+        return await implementations.clear(input);
       }),
   });
 };

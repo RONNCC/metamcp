@@ -6,6 +6,7 @@ import {
   OAuthTokens,
   OAuthTokensSchema,
 } from "@modelcontextprotocol/sdk/shared/auth.js";
+import { loopbackRedirectUriFor, loopbackScopeFor } from "@repo/zod-types";
 
 import { getServerSpecificKey, SESSION_KEYS } from "./constants";
 import { getAppUrl } from "./env";
@@ -32,11 +33,33 @@ class DbOAuthClientProvider implements OAuthClientProvider {
     }
   }
 
+  private get serverHostname(): string | undefined {
+    try {
+      return new URL(this.serverUrl).hostname;
+    } catch {
+      return undefined;
+    }
+  }
+
   get redirectUrl() {
-    return getAppUrl() + "/fe-oauth/callback";
+    // Providers with no dynamic client registration (their redirect_uri
+    // allowlist is a fixed set an admin configures by hand, exact-string-
+    // matched per RFC 6749 §3.1.2) cannot know this deployment's APP_URL
+    // ahead of time. Those get the RFC 8252 §7.3 loopback convention
+    // Claude Code/VS Code already use — see @repo/zod-types'
+    // OAUTH_LOOPBACK_PROVIDERS and apps/backend/src/lib/oauth-loopback-forwarder.ts,
+    // which catches the provider's redirect there and forwards it here.
+    // Every other connector gets the deployment-specific /fe-oauth/callback.
+    const hostname = this.serverHostname;
+    return (
+      (hostname && loopbackRedirectUriFor(hostname)) ??
+      getAppUrl() + "/fe-oauth/callback"
+    );
   }
 
   get clientMetadata(): OAuthClientMetadata {
+    const hostname = this.serverHostname;
+    const scope = hostname ? loopbackScopeFor(hostname) : undefined;
     return {
       redirect_uris: [this.redirectUrl],
       token_endpoint_auth_method: "none",
@@ -44,6 +67,7 @@ class DbOAuthClientProvider implements OAuthClientProvider {
       response_types: ["code"],
       client_name: "MetaMCP",
       client_uri: "https://github.com/metatool-ai/metamcp",
+      ...(scope ? { scope } : {}),
     };
   }
 
@@ -167,6 +191,18 @@ class DbOAuthClientProvider implements OAuthClientProvider {
   }
 
   redirectToAuthorization(authorizationUrl: URL) {
+    // Slack v2 OAuth uses `user_scope` for user tokens (which Slack MCP
+    // uses) and `scope` for bot tokens. The standard MCP SDK sets `scope`.
+    // If this is Slack, copy `scope` into `user_scope` and delete `scope`
+    // so Slack validates user permissions instead of failing with
+    // "Invalid permissions requested / No scopes requested".
+    if (this.serverHostname === "mcp.slack.com") {
+      const scope = authorizationUrl.searchParams.get("scope");
+      if (scope) {
+        authorizationUrl.searchParams.set("user_scope", scope);
+        authorizationUrl.searchParams.delete("scope");
+      }
+    }
     window.location.href = authorizationUrl.href;
   }
 
@@ -233,6 +269,55 @@ class DbOAuthClientProvider implements OAuthClientProvider {
       getServerSpecificKey(SESSION_KEYS.CODE_VERIFIER, this.serverUrl),
     );
   }
+}
+
+// Same-origin relay for the SDK `auth()` fetch points (discovery, DCR
+// register, token exchange/refresh). The SDK defaults to `fetch` directly
+// against the upstream origin, which the document CSP (connect-src 'self')
+// blocks. This fetch posts to the backend `/mcp-proxy/server/oauth-fetch`
+// route, which validates the target against the registered row's origin
+// under the SSRF guard and returns the upstream response. Lookup is by row
+// uuid only; no oauth_sessions state required.
+export function createProxiedFetch(
+  mcpServerUuid: string,
+): (url: string | URL, init?: RequestInit) => Promise<Response> {
+  return async (url: string | URL, init?: RequestInit) => {
+    const target = String(url);
+    // Lowercase keys: `new Headers().forEach` always yields lowercase
+    // names, so forward them as-is and let the backend merge them into a
+    // real Headers instance (case-insensitive) rather than a plain object.
+    const headers: Record<string, string> = {};
+    if (init?.headers) {
+      new Headers(init.headers).forEach((value, key) => {
+        headers[key.toLowerCase()] = value;
+      });
+    }
+    const body =
+      typeof init?.body === "string"
+        ? init.body
+        : init?.body != null
+          ? String(init.body)
+          : undefined;
+    const res = await fetch(`/mcp-proxy/server/oauth-fetch`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({
+        mcpServerUuid,
+        url: target,
+        method: init?.method ?? "GET",
+        headers,
+        body,
+      }),
+    });
+    const text = await res.text();
+    const upstreamHeaders = new Headers();
+    const contentType = res.headers.get("content-type");
+    if (contentType) upstreamHeaders.set("Content-Type", contentType);
+    const wwwAuthenticate = res.headers.get("www-authenticate");
+    if (wwwAuthenticate) upstreamHeaders.set("WWW-Authenticate", wwwAuthenticate);
+    return new Response(text, { status: res.status, headers: upstreamHeaders });
+  };
 }
 
 // Factory function to create an OAuth provider for a specific MCP server

@@ -1238,6 +1238,34 @@ describe("GET /oauth/callback — the params blob no longer mints", () => {
     // no longer match the discovery issuer.
     expect(ISSUER).toBe(`${APP_URL}/`);
   });
+
+  it("forwards an unrecognized code to /fe-oauth/callback for upstream providers", async () => {
+    oauthRepositoryMock.getAuthCode.mockResolvedValue(undefined);
+
+    const res = await dispatch({
+      method: "GET",
+      path: "/oauth/callback",
+      query: { code: "glean_upstream_code_123", state: "custom_state" },
+    });
+
+    const redirect = redirectUrl(res);
+    expect(redirect.pathname).toBe("/fe-oauth/callback");
+    expect(redirect.searchParams.get("code")).toBe("glean_upstream_code_123");
+    expect(redirect.searchParams.get("state")).toBe("custom_state");
+  });
+
+  it("forwards upstream OAuth error to /fe-oauth/callback", async () => {
+    const res = await dispatch({
+      method: "GET",
+      path: "/oauth/callback",
+      query: { error: "access_denied", error_description: "User denied access" },
+    });
+
+    const redirect = redirectUrl(res);
+    expect(redirect.pathname).toBe("/fe-oauth/callback");
+    expect(redirect.searchParams.get("error")).toBe("access_denied");
+    expect(redirect.searchParams.get("error_description")).toBe("User denied access");
+  });
 });
 
 // ---------------------------------------------------------------------------

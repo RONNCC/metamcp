@@ -159,6 +159,10 @@ describe("oauth.upsert — admin gate", () => {
         },
         message: "ok",
       }),
+      clear: vi.fn().mockResolvedValue({
+        success: false as const,
+        error: "not used in this suite",
+      }),
     });
 
   const upsertInput = {

@@ -26,6 +26,7 @@ import logger from "@/utils/logger";
 import {
   mcpServersRepository,
   namespaceMappingsRepository,
+  oauthSessionsRepository,
 } from "../../db/repositories";
 import { metaMcpServerPool } from "../../lib/metamcp/metamcp-server-pool";
 import mcpProxy from "../../lib/mcp-proxy";
@@ -1109,6 +1110,231 @@ serverRouter.post("/message", async (req, res) => {
   } catch (error) {
     logger.error("Error in /message route:", error);
     res.status(500).json(error);
+  }
+});
+
+serverRouter.post("/oauth-fetch", express.json({ limit: "256kb" }), async (req, res) => {
+  try {
+    // Same-origin relay for the browser OAuth client (discovery, DCR
+    // register, token exchange). The SDK `auth()` flow fetches the
+    // upstream's .well-known endpoints directly, which the frontend CSP
+    // (connect-src 'self') blocks. This route performs those fetches
+    // server-side under the existing SSRF guard and returns the result.
+    // Lookup scoped to caller-visible rows; no oauth_sessions state
+    // required (fresh DCR works with zero rows).
+    const schema = z.object({
+      mcpServerUuid: z.string().uuid(),
+      url: z.string().url().max(2048),
+      method: z.enum(["GET", "POST"]).default("POST"),
+      headers: z.record(z.string(), z.string()).optional(),
+      body: z.string().max(102400).optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid request body" });
+      return;
+    }
+    const { mcpServerUuid, url, method, headers, body } = parsed.data;
+    const user = (req as express.Request & { user?: SessionUser }).user;
+    const userId = user?.id;
+    if (!userId) {
+      logger.warn("OAuth proxy refused: no session user on the request");
+      res.status(404).json({ error: "Unknown MCP server" });
+      return;
+    }
+    const accessible = await mcpServersRepository.findAllAccessibleToUser(userId);
+    const row = accessible.find((candidate) => candidate.uuid === mcpServerUuid);
+    if (!row || !row.url) {
+      res.status(404).json({ error: "Unknown MCP server" });
+      return;
+    }
+    // Pin the fetch to the registered row's origin. A caller-supplied url
+    // on a different origin is refused: the exemption covers the origin
+    // the operator registered and nothing else.
+    const registeredOrigin = new URL(row.url).origin;
+    let targetOrigin: string;
+    try {
+      targetOrigin = new URL(url).origin;
+    } catch {
+      res.status(400).json({ error: "Invalid url" });
+      return;
+    }
+    if (targetOrigin !== registeredOrigin) {
+      logger.warn(
+        `OAuth proxy refused: target origin mismatch for server ${row.name} (${row.uuid})`,
+      );
+      res.status(404).json({ error: "Unknown MCP server" });
+      return;
+    }
+    const guardedFetch = createGuardedFetch({
+      allowlistOrigin: registeredOrigin,
+      refuseCrossOriginRedirect: true,
+      requestTimeoutMs: 15000,
+      maxResponseBytes: 1048576,
+    });
+    // Case-insensitive merge: forwarded keys arrive lowercased from the
+    // browser (`new Headers().forEach`), so fold them into a real Headers
+    // instance instead of a plain object (which would keep both
+    // "Content-Type" and "content-type" as distinct keys and break the
+    // form-urlencoded token POSTs).
+    const outgoing = new Headers();
+    outgoing.set("Accept", "application/json");
+    for (const [key, value] of Object.entries(headers ?? {})) {
+      outgoing.set(key, value);
+    }
+    const upstream = await guardedFetch(url, {
+      method,
+      headers: outgoing,
+      body: method === "GET" ? undefined : body,
+    });
+    const text = await upstream.text();
+    const contentType = upstream.headers?.get?.("content-type");
+    if (contentType) res.set("Content-Type", contentType);
+    const wwwAuthenticate = upstream.headers?.get?.("www-authenticate");
+    if (wwwAuthenticate) res.set("WWW-Authenticate", wwwAuthenticate);
+    res.status(upstream.status).send(text);
+  } catch (error) {
+    logger.error("Error in /oauth-fetch route:", error);
+    res.status(500).json({ error: "OAuth proxy fetch failed" });
+  }
+});
+
+serverRouter.post("/probe-auth", express.json({ limit: "64kb" }), async (req, res) => {
+  try {
+    // Autodetect how a remote MCP server expects to be connected.
+    // Probes, in order: (1) RFC 9728/8414 discovery metadata
+    // (DCR/CIMD/static decision), (2) unauthenticated MCP initialize
+    // (open server, only when no OAuth metadata exists), (3) stored
+    // oauth_sessions state for this row. Metadata first because several
+    // servers accept an anonymous initialize handshake yet require OAuth
+    // on tools/call. Returns a machine-readable verdict the Connect UX
+    // renders as guidance. Same origin pin + SSRF guard as /oauth-fetch.
+    // Row uuid lookup, scoped to caller-visible rows.
+    const schema = z.object({ mcpServerUuid: z.string().uuid() });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid request body" });
+      return;
+    }
+    const user = (req as express.Request & { user?: SessionUser }).user;
+    const userId = user?.id;
+    if (!userId) {
+      logger.warn("Probe refused: no session user on the request");
+      res.status(404).json({ error: "Unknown MCP server" });
+      return;
+    }
+    const accessible = await mcpServersRepository.findAllAccessibleToUser(userId);
+    const row = accessible.find((candidate) => candidate.uuid === parsed.data.mcpServerUuid);
+    if (!row) {
+      res.status(404).json({ error: "Unknown MCP server" });
+      return;
+    }
+    if (row.type === "STDIO" || !row.url) {
+      res.json({ kind: "stdio", guidance: "Local process server. No OAuth." });
+      return;
+    }
+    const registeredOrigin = new URL(row.url).origin;
+    const guardedFetch = createGuardedFetch({
+      allowlistOrigin: registeredOrigin,
+      refuseCrossOriginRedirect: true,
+      requestTimeoutMs: 15000,
+      maxResponseBytes: 1048576,
+    });
+    // (1) Discovery metadata first.
+    const origin = registeredOrigin;
+    interface AsMeta {
+      registration_endpoint?: string;
+      client_id_metadata_document_supported?: boolean;
+      authorization_endpoint?: string;
+      token_endpoint?: string;
+    }
+    let asMeta: AsMeta | null = null;
+    for (const candidate of [
+      `${origin}/.well-known/oauth-authorization-server`,
+      `${row.url}/.well-known/oauth-authorization-server`,
+    ]) {
+      try {
+        const r = await guardedFetch(candidate, { method: "GET" });
+        if (!r.ok) continue;
+        const text = await r.text();
+        try {
+          asMeta = JSON.parse(text) as AsMeta;
+          break;
+        } catch {
+          continue;
+        }
+      } catch {
+        continue;
+      }
+    }
+    if (asMeta) {
+      // (3) Stored credential state for this row.
+      const session = await oauthSessionsRepository.findByMcpServerUuid(row.uuid);
+      const stored = session
+        ? {
+            hasClientInfo: !!(session.client_information as { client_id?: string } | null)?.client_id,
+            hasTokens: !!(session.tokens as { access_token?: string } | null)?.access_token,
+          }
+        : { hasClientInfo: false, hasTokens: false };
+      if (asMeta.registration_endpoint) {
+        res.json({
+          kind: stored.hasTokens ? "dcr-ready" : "dcr",
+          guidance: stored.hasTokens
+            ? "Dynamic registration supported. Tokens stored. Connect or refresh on 401."
+            : "Dynamic registration supported. Connect runs full DCR automatically.",
+          authorizationEndpoint: asMeta.authorization_endpoint,
+          tokenEndpoint: asMeta.token_endpoint,
+          stored,
+        });
+        return;
+      }
+      res.json({
+        kind: stored.hasTokens
+          ? "static-connected"
+          : stored.hasClientInfo
+            ? "static-ready"
+            : "static-required",
+        guidance: stored.hasTokens
+          ? "Static client ID and tokens stored. Ready to connect."
+          : stored.hasClientInfo
+            ? "Static client ID stored. Connect skips registration and goes to authorize."
+            : "No dynamic registration. Paste the provider app client ID in Edit server, OAuth Client ID, then Connect.",
+        authorizationEndpoint: asMeta.authorization_endpoint,
+        tokenEndpoint: asMeta.token_endpoint,
+        stored,
+      });
+      return;
+    }
+    // (2) No OAuth metadata: open server? Unauthenticated initialize.
+    // Note: a 200 here confirms the handshake only, not tool access.
+    try {
+      const probe = await guardedFetch(row.url, {
+        method: "POST",
+        headers: new Headers({
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+        }),
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "probe", version: "0" } },
+        }),
+      });
+      if (probe.status === 200) {
+        res.json({ kind: "open", guidance: "No OAuth metadata found; handshake accepts anonymous initialize. Connect directly; tool calls may still require auth." });
+        return;
+      }
+    } catch {
+      // Fall through to unknown.
+    }
+    res.json({
+      kind: "unknown",
+      guidance: "No OAuth metadata found. Likely API-key header or custom auth. Check server docs.",
+    });
+  } catch (error) {
+    logger.error("Error in /probe-auth route:", error);
+    res.status(500).json({ error: "Probe failed" });
   }
 });
 

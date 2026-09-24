@@ -93,6 +93,7 @@ export const EditServerFormSchema = z
     args: z.string().optional(),
     url: z.string().optional(),
     bearerToken: z.string().optional(),
+    oauthClientId: z.string().optional(),
     headers: z.string().optional(),
     env: z.string().optional(),
     user_id: z.string().nullable().optional(),

@@ -60,7 +60,11 @@ const buildRouter = () => {
     success: false as const,
     error: "not used in this suite",
   });
-  return { router: createOAuthRouter({ get, upsert }), get };
+  const clear = vi.fn().mockResolvedValue({
+    success: false as const,
+    error: "not used in this suite",
+  });
+  return { router: createOAuthRouter({ get, upsert, clear }), get };
 };
 
 describe("oauth.get — admin gate", () => {

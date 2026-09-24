@@ -103,6 +103,22 @@ export class OAuthSessionsRepository {
 
     return deletedSession;
   }
+
+  // Null out tokens + verifier, preserve client_information. The upsert
+  // path treats undefined as omit-do-not-touch, so it cannot clear; this
+  // is the real clear path for expired-grant recovery (static client IDs
+  // survive, DCR rows re-register on next Connect).
+  async clearTokens(
+    mcpServerUuid: string,
+  ): Promise<DatabaseOAuthSession | undefined> {
+    const [cleared] = await db
+      .update(oauthSessionsTable)
+      .set({ tokens: null, code_verifier: null, updated_at: sql`NOW()` })
+      .where(eq(oauthSessionsTable.mcp_server_uuid, mcpServerUuid))
+      .returning();
+
+    return cleared;
+  }
 }
 
 export const oauthSessionsRepository = new OAuthSessionsRepository();

@@ -759,9 +759,22 @@ authorizationRouter.get("/oauth/callback", async (req, res) => {
 
     // Handle direct callback with individual query parameters
     // This is likely from an external OAuth flow or direct URL access
-    const { code, state } = req.query;
+    const { code, state, error } = req.query;
 
     if (!code) {
+      if (error) {
+        const query = new URLSearchParams();
+        for (const [key, value] of Object.entries(req.query)) {
+          if (typeof value === "string") {
+            query.set(key, value);
+          } else if (Array.isArray(value)) {
+            for (const v of value) {
+              if (typeof v === "string") query.append(key, v);
+            }
+          }
+        }
+        return res.redirect(`${getBaseUrl(req)}/fe-oauth/callback?${query.toString()}`);
+      }
       return res.status(400).send("Missing authorization code");
     }
 
@@ -817,10 +830,19 @@ authorizationRouter.get("/oauth/callback", async (req, res) => {
       }
       return res.redirect(redirectUrl.toString());
     } else {
-      return res.status(400).json({
-        error: "invalid_request",
-        error_description: "Invalid authorization parameters",
-      });
+      // Upstream OAuth provider callback (e.g. Glean, Slack) redirected to /oauth/callback.
+      // Forward to the frontend OAuth callback handler.
+      const query = new URLSearchParams();
+      for (const [key, value] of Object.entries(req.query)) {
+        if (typeof value === "string") {
+          query.set(key, value);
+        } else if (Array.isArray(value)) {
+          for (const v of value) {
+            if (typeof v === "string") query.append(key, v);
+          }
+        }
+      }
+      return res.redirect(`${getBaseUrl(req)}/fe-oauth/callback?${query.toString()}`);
     }
   } catch (error) {
     logger.error("Error in OAuth callback:", error);

@@ -74,4 +74,43 @@ export const oauthImplementations = {
       };
     }
   },
+
+  clear: async (
+    input: z.infer<typeof GetOAuthSessionRequestSchema>,
+  ): Promise<z.infer<typeof UpsertOAuthSessionResponseSchema>> => {
+    try {
+      // Null out tokens + verifier, preserve client_information (static
+      // client IDs survive; DCR rows re-register on next Connect).
+      const existing =
+        await oauthSessionsRepository.findByMcpServerUuid(
+          input.mcp_server_uuid,
+        );
+      if (!existing) {
+        return {
+          success: false as const,
+          error: "OAuth session not found",
+        };
+      }
+      const session = await oauthSessionsRepository.clearTokens(
+        input.mcp_server_uuid,
+      );
+      if (!session) {
+        return {
+          success: false as const,
+          error: "Failed to clear OAuth session",
+        };
+      }
+      return {
+        success: true as const,
+        data: OAuthSessionsSerializer.serializeOAuthSession(session),
+        message: "OAuth tokens cleared successfully",
+      };
+    } catch (error) {
+      logger.error("Error clearing OAuth session:", error);
+      return {
+        success: false as const,
+        error: error instanceof Error ? error.message : "Internal server error",
+      };
+    }
+  },
 };

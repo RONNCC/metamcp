@@ -39,6 +39,7 @@ import {
   computeReconnectBackoffMs,
   createMetaMcpClient,
   ListChangedSubscriber,
+  resolveSierraSessionToken,
 } from "./client";
 
 /**
@@ -308,5 +309,23 @@ describe("createMetaMcpClient — STREAMABLE_HTTP transport option wiring", () =
       (internals._requestInit?.headers as Record<string, string>)["X-Custom"],
     ).toBe("yes");
     expect(typeof internals._fetch).toBe("function");
+  });
+
+  it("sierra server: injects fresh session token from disk if available", () => {
+    const internals = transportInternals({
+      name: "sierra",
+      headers: {
+        Authorization: "Bearer old-stale-token",
+        "X-Sierra-Workspace-Id": "workspace-123",
+      },
+    });
+    const headers = internals._requestInit?.headers as Record<string, string>;
+    const diskToken = resolveSierraSessionToken();
+    if (diskToken) {
+      expect(headers.Authorization).toBe(`Bearer ${diskToken}`);
+    } else {
+      expect(headers.Authorization).toBe("Bearer old-stale-token");
+    }
+    expect(headers["X-Sierra-Workspace-Id"]).toBe("workspace-123");
   });
 });

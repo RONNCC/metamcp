@@ -14,7 +14,7 @@
  * makes this the exact condition that would have caught the regression.
  */
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { SESSION_KEYS } from "./constants";
 import { createAuthProvider } from "./oauth-provider";
@@ -22,12 +22,13 @@ import { createAuthProvider } from "./oauth-provider";
 const UUID = "11111111-1111-1111-1111-111111111111";
 const SERVER_URL = "/mcp-proxy/metamcp/x/sse";
 
-afterEach(() => {
-  // Remove any browser globals a test installed so the SSR assertion below
-  // cannot be masked by leakage from the browser-path test.
+const cleanGlobals = () => {
   delete (globalThis as { window?: unknown }).window;
   delete (globalThis as { sessionStorage?: unknown }).sessionStorage;
-});
+};
+
+beforeEach(cleanGlobals);
+afterEach(cleanGlobals);
 
 describe("createAuthProvider under SSR", () => {
   it("does not throw when web storage is absent", () => {

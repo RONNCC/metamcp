@@ -2,11 +2,12 @@
 
 import { auth } from "@modelcontextprotocol/sdk/client/auth.js";
 import { useEffect, useRef } from "react";
+import { toast } from "sonner";
 
 import { useTranslations } from "@/hooks/useTranslations";
 
 import { getServerSpecificKey, SESSION_KEYS } from "../lib/constants";
-import { createAuthProvider } from "../lib/oauth-provider";
+import { createAuthProvider, createProxiedFetch } from "../lib/oauth-provider";
 import { vanillaTrpcClient } from "../lib/trpc";
 
 // Drop every sessionStorage entry the SDK used during the pre-redirect
@@ -58,10 +59,12 @@ const OAuthCallback = () => {
         // Create auth provider with existing server UUID and URL
         const authProvider = createAuthProvider(mcpServerUuid, serverUrl);
 
-        // Complete the OAuth flow
+        // Complete the OAuth flow. fetchFn routes discovery/register/token
+        // through the same-origin backend relay (CSP blocks direct fetch).
         const result = await auth(authProvider, {
           serverUrl,
           authorizationCode: code,
+          fetchFn: createProxiedFetch(mcpServerUuid),
         });
 
         if (result !== "AUTHORIZED") {
@@ -102,8 +105,39 @@ const OAuthCallback = () => {
         window.location.href = `/mcp-servers/${mcpServerUuid}`;
       } catch (error) {
         console.error("OAuth callback error:", error);
+        // Mirror the Connect-path mapping: class name first, server page back.
+        const msg =
+          error instanceof Error
+            ? `${error.name}: ${error.message}`
+            : String(error);
+        const isDcrRefusal =
+          msg.includes("does not support dynamic client registration") ||
+          msg.includes("registration_not_supported") ||
+          (msg.toLowerCase().includes("regist") &&
+            (msg.includes("404") || msg.includes("405") || msg.includes("403")));
+        if (isDcrRefusal) {
+          toast.error("Server needs a static OAuth client ID", {
+            description:
+              "Edit server, paste the Slack app client ID, then Connect.",
+          });
+        } else if (
+          msg.includes("invalid_grant") ||
+          msg.includes("InvalidGrantError")
+        ) {
+          toast.error("OAuth grant expired, reconnect to re-authorize");
+        } else if (
+          msg.includes("invalid_client") ||
+          msg.includes("InvalidClientError")
+        ) {
+          toast.error("OAuth client rejected, check the static client ID", {
+            description:
+              "Edit server, verify the OAuth client ID, then Connect.",
+          });
+        } else {
+          toast.error("OAuth authorization failed");
+        }
         clearOAuthSessionKeys(serverUrl);
-        window.location.href = "/mcp-servers";
+        window.location.href = `/mcp-servers/${mcpServerUuid}`;
       }
     };
 

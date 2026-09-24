@@ -36,7 +36,7 @@ interface EditMcpServerProps {
   server: McpServer | null;
   isOpen: boolean;
   onClose: () => void;
-  onSuccess: (updatedServer: McpServer) => void;
+  onSuccess: (updatedServer: McpServer) => void | Promise<void>;
 }
 
 export function EditMcpServer({
@@ -51,14 +51,37 @@ export function EditMcpServer({
   // Get tRPC utils for cache invalidation
   const utils = trpc.useUtils();
 
-  // tRPC mutation for updating MCP server
+  // tRPC mutations for updating MCP server + OAuth client credentials
+  const oauthUpsertMutation = trpc.frontend.oauth.upsert.useMutation();
   const updateServerMutation = trpc.frontend.mcpServers.update.useMutation({
-    onSuccess: (data) => {
+    onSuccess: async (data) => {
       if (data.success && data.data) {
         // Invalidate both the list and individual server queries
         utils.frontend.mcpServers.list.invalidate();
         if (server) {
           utils.frontend.mcpServers.get.invalidate({ uuid: server.uuid });
+        }
+        // Persist a static OAuth client ID (servers without DCR, e.g.
+        // Slack). Skipped when blank so clearing the field never wipes a
+        // stored credential by accident. Read from the form, not the
+        // mutation variables: oauthClientId is form-only, never part of
+        // UpdateMcpServerRequest.
+        const clientId = editForm.getValues("oauthClientId")?.trim();
+        if (server && clientId) {
+          try {
+            await oauthUpsertMutation.mutateAsync({
+              mcp_server_uuid: server.uuid,
+              client_information: { client_id: clientId },
+            });
+          } catch (oauthError) {
+            toast.error(t("mcp-servers:serverUpdateError"), {
+              description:
+                oauthError instanceof Error
+                  ? oauthError.message
+                  : t("common:unexpectedError"),
+            });
+            return;
+          }
         }
 
         toast.success(t("mcp-servers:serverUpdated"), {
@@ -66,7 +89,7 @@ export function EditMcpServer({
             name: data.data.name,
           }),
         });
-        onSuccess(data.data);
+        await onSuccess(data.data);
         onClose();
         editForm.reset();
       } else {
@@ -156,9 +179,8 @@ export function EditMcpServer({
       args: "",
       url: "",
       bearerToken: "",
+      oauthClientId: "",
       headers: "",
-      env: "",
-      user_id: undefined,
     },
   });
 
@@ -493,6 +515,25 @@ export function EditMcpServer({
                   placeholder={t("mcp-servers:bearerTokenPlaceholder")}
                   type="password"
                 />
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <label
+                  htmlFor="edit-oauthClientId"
+                  className="text-sm font-medium"
+                >
+                  OAuth Client ID
+                </label>
+                <Input
+                  id="edit-oauthClientId"
+                  {...editForm.register("oauthClientId")}
+                  placeholder="e.g. 600065862099.xxxxx"
+                  type="text"
+                />
+                <p className="text-xs text-muted-foreground">
+                  For servers without dynamic registration (e.g. Slack). Paste
+                  the Slack app client ID here.
+                </p>
               </div>
 
               <div className="flex flex-col gap-2">

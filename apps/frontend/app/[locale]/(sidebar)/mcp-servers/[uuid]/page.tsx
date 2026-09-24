@@ -64,6 +64,8 @@ export default function McpServerDetailPage({
     useState<boolean>(false);
   const [showDeleteDialog, setShowDeleteDialog] = useState<boolean>(false);
   const [editDialogOpen, setEditDialogOpen] = useState<boolean>(false);
+  const [probeVersion, setProbeVersion] = useState<number>(0);
+  const [probeError, setProbeError] = useState<string | null>(null);
 
   // Function to toggle env var visibility
   const toggleEnvVarVisibility = (key: string) => {
@@ -182,24 +184,37 @@ export default function McpServerDetailPage({
     ),
   });
 
-  // Auto-connect when hook is enabled and not already connected.
-  // Guarded against React Strict Mode double-invocation: without the ref,
-  // both fires race two concurrent OAuth registrations and the browser/DB
-  // disagree on client_id. (ai-dev 89592bb.)
+  // Probe verdict: how this server expects to be connected. Fetched once
+  // the row loads; drives the guidance banner under the header and safe auto-connect.
+  const [probe, setProbe] = useState<{
+    kind: string;
+    guidance: string;
+  } | null>(null);
+
+  // Auto-connect safely when:
+  // - It's STDIO (never redirects)
+  // - Or probe confirms tokens are already stored (dcr-ready or static-connected)
+  // - Or it's an open server with no OAuth
+  // Interactive authorization is NEVER auto-triggered on page load.
   const didAutoConnect = useRef(false);
   useEffect(() => {
     if (didAutoConnect.current) return;
-    if (
-      connection &&
-      server &&
-      !isLoading &&
-      server.error_status !== McpServerErrorStatusEnum.enum.ERROR &&
-      connection.connectionStatus === "disconnected"
-    ) {
+    if (!server || isLoading || server.error_status === McpServerErrorStatusEnum.enum.ERROR) {
+      return;
+    }
+    if (connection.connectionStatus !== "disconnected") return;
+
+    const canAutoConnect =
+      server.type === McpServerTypeEnum.enum.STDIO ||
+      probe?.kind === "static-connected" ||
+      probe?.kind === "dcr-ready" ||
+      probe?.kind === "open";
+
+    if (canAutoConnect) {
       didAutoConnect.current = true;
       connection.connect();
     }
-  }, [server, connection, isLoading]);
+  }, [server, connection, isLoading, probe]);
 
   // Handle delete server
   const handleDeleteServer = async () => {
@@ -210,6 +225,8 @@ export default function McpServerDetailPage({
   const handleEditSuccess = () => {
     // Invalidate cache to get fresh data (already handled by EditMcpServer component)
     setEditDialogOpen(false);
+    // Re-probe auth: a saved OAuth client ID changes the verdict.
+    setProbeVersion((v) => v + 1);
     // Toast is handled by the EditMcpServer component
   };
 
@@ -222,6 +239,38 @@ export default function McpServerDetailPage({
       refetch();
     }
   }, [connection.connectionStatus, server?.error_status, refetch]);
+
+  useEffect(() => {
+    if (!server || server.type === McpServerTypeEnum.enum.STDIO) return;
+    let cancelled = false;
+    setProbeError(null);
+    fetch(`/mcp-proxy/server/probe-auth`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ mcpServerUuid: uuid }),
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error(`Probe request failed (${res.status})`);
+        return res.json();
+      })
+      .then((data) => {
+        if (cancelled) return;
+        if (data?.kind) {
+          setProbe(data);
+        } else {
+          setProbeError("Probe returned an unexpected response.");
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setProbeError(err instanceof Error ? err.message : "Probe failed.");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [server, uuid, probeVersion, editDialogOpen]);
 
   // Handle manual connect/disconnect
   const handleConnectionToggle = () => {
@@ -507,7 +556,30 @@ export default function McpServerDetailPage({
           </div>
         </div>
 
-        {/* Server Details */}
+        {/* Auth probe verdict: how this server expects to be connected */}
+        {probeError && (
+          <div className="rounded-md border border-destructive/50 px-4 py-3 text-sm text-muted-foreground">
+            <span className="font-medium text-destructive">
+              Auth probe failed: {probeError}
+            </span>{" "}
+            <Button
+              variant="outline"
+              size="sm"
+              className="ml-2"
+              onClick={() => setProbeVersion((v) => v + 1)}
+            >
+              <RefreshCw className="h-4 w-4 mr-2" />
+              {t("mcp-servers:detail.retry")}
+            </Button>
+          </div>
+        )}
+        {probe && (
+          <div className="rounded-md border px-4 py-3 text-sm text-muted-foreground">
+            <span className="font-medium text-foreground">Auth: {probe.kind}</span>
+            {" — "}
+            {probe.guidance}
+          </div>
+        )}
         {server ? (
           <div className="grid gap-6 md:grid-cols-2">
             {/* Basic Information */}
