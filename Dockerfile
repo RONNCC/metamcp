@@ -80,7 +80,13 @@ LABEL org.opencontainers.image.title="MetaMCP"
 LABEL org.opencontainers.image.vendor="metatool-ai"
 
 # Install curl for health checks
-RUN apt-get update && apt-get install -y curl postgresql-client && apt-get clean && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y \
+    curl \
+    postgresql-client \
+    chromium \
+    && npm install -g openevidence-mcp \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user with proper home directory
 RUN addgroup --system --gid 1001 nodejs
