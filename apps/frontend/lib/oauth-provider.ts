@@ -191,18 +191,6 @@ class DbOAuthClientProvider implements OAuthClientProvider {
   }
 
   redirectToAuthorization(authorizationUrl: URL) {
-    // Slack v2 OAuth uses `user_scope` for user tokens (which Slack MCP
-    // uses) and `scope` for bot tokens. The standard MCP SDK sets `scope`.
-    // If this is Slack, copy `scope` into `user_scope` and delete `scope`
-    // so Slack validates user permissions instead of failing with
-    // "Invalid permissions requested / No scopes requested".
-    if (this.serverHostname === "mcp.slack.com") {
-      const scope = authorizationUrl.searchParams.get("scope");
-      if (scope) {
-        authorizationUrl.searchParams.set("user_scope", scope);
-        authorizationUrl.searchParams.delete("scope");
-      }
-    }
     window.location.href = authorizationUrl.href;
   }
 

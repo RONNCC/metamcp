@@ -38,14 +38,16 @@ export const OAUTH_LOOPBACK_PROVIDERS: readonly OAuthLoopbackProvider[] = [
   // Already whitelisted on this Slack app for Claude Code/VS Code's own
   // loopback OAuth flows (~/.claude.json's slack-ds entry uses the same
   // port), so no new provider-side whitelist request is needed. Scope list
-  // from https://mcp.slack.com/.well-known/oauth-protected-resource's
-  // scopes_supported.
+  // mirrors https://mcp.slack.com/.well-known/oauth-protected-resource's
+  // scopes_supported: the SDK's scope chain only falls back to it when
+  // path-aware PRM discovery fails, but then it must match exactly or
+  // Slack rejects the authorize request ("Invalid permissions requested").
   {
     hostname: "mcp.slack.com",
     port: 3881,
     callbackPath: "/callback",
     scope:
-      "identify channels:history groups:history im:history mpim:history channels:read emoji:read files:read canvases:read groups:read mpim:read reactions:read users:read users:read.email channels:write chat:write canvases:write groups:write im:write mpim:write reactions:write search:read.public search:read.private search:read.mpim search:read.im search:read.files search:read.users",
+      "canvases:read canvases:write channels:history channels:read channels:write chat:write emoji:read files:read files:write groups:history groups:read groups:write im:history im:read im:write lists:read lists:write mpim:history mpim:read mpim:write reactions:read reactions:write search:read.files search:read.im search:read.mpim search:read.private search:read.public search:read.users users:read users:read.email",
   },
 ];
 

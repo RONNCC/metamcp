@@ -1148,9 +1148,12 @@ serverRouter.post("/oauth-fetch", express.json({ limit: "256kb" }), async (req, 
       res.status(404).json({ error: "Unknown MCP server" });
       return;
     }
-    // Pin the fetch to the registered row's origin. A caller-supplied url
-    // on a different origin is refused: the exemption covers the origin
-    // the operator registered and nothing else.
+    // Pin the fetch to the registered row's origin *family*. A
+    // caller-supplied url anywhere else is refused: the exemption covers
+    // the registered origin plus sibling subdomains under the same
+    // registrable domain (e.g. the mcp-9827.slack.com discovery redirect
+    // and slack.com token endpoint behind a mcp.slack.com row) and
+    // nothing else.
     const registeredOrigin = new URL(row.url).origin;
     let targetOrigin: string;
     try {
@@ -1159,7 +1162,26 @@ serverRouter.post("/oauth-fetch", express.json({ limit: "256kb" }), async (req, 
       res.status(400).json({ error: "Invalid url" });
       return;
     }
-    if (targetOrigin !== registeredOrigin) {
+    const registeredHost = new URL(row.url).hostname.toLowerCase();
+    // Sibling host under the registered registrable domain (e.g.
+    // mcp-9827.slack.com behind a mcp.slack.com row) or that domain's
+    // apex (slack.com: AS metadata and token endpoint). Shares DNS
+    // authority with the registered host; keeps the SSRF guard's
+    // public-destination checks, only rejoins the origin pin.
+    const sharesRegistrableDomain = (host: string): boolean => {
+      const parts = host.toLowerCase().split(".");
+      const regParts = registeredHost.split(".");
+      const regSuffix = regParts.slice(1).join(".");
+      if (host.toLowerCase() === regSuffix) return true;
+      if (parts.length < regParts.length) return false;
+      const suffix = parts.slice(parts.length - regParts.length + 1);
+      return suffix.join(".") === regSuffix;
+    };
+    const targetHost = new URL(url).hostname;
+    if (
+      targetOrigin !== registeredOrigin &&
+      !sharesRegistrableDomain(targetHost)
+    ) {
       logger.warn(
         `OAuth proxy refused: target origin mismatch for server ${row.name} (${row.uuid})`,
       );
