@@ -296,13 +296,15 @@ export function useConnection({
     ) {
       msg = error.message;
     }
-    const isMissingToken =
+    const isStreamableAuthError =
       error !== null &&
       typeof error === "object" &&
       "code" in error &&
       error.code === -32001 &&
-      msg.includes("missing_token");
-    if (isMissingToken) return true;
+      (msg.includes("missing_token") ||
+        msg.includes("authentication_required") ||
+        msg.includes("Authenticate with the gateway"));
+    if (isStreamableAuthError) return true;
     return Boolean(
       (error instanceof SseError && error.code === 401) ||
         msg.includes("401") ||
@@ -315,6 +317,8 @@ export function useConnection({
         (msg.includes("invalid_token") && msg.includes("error_description")) ||
         (msg.includes("Authentication required") &&
           msg.includes("error_description")) ||
+        msg.includes("authentication_required") ||
+        msg.includes("Authenticate with the gateway") ||
         // Handle fetch errors that might come from streamable HTTP
         (error instanceof TypeError && error.message.includes("401")) ||
         // Handle response errors
