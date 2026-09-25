@@ -100,6 +100,9 @@ for _brand_key in PRODUCT_NAME ORG_NAME LOGO_PATH DESCRIPTION; do
 done
 unset _brand_key _public_var _alias_var _public_val _alias_val
 
+# Clean stale Chromium singleton locks in mounted profile to prevent profile in-use crashes across container recreates
+rm -f /home/nextjs/.openevidence-mcp/browser-profile/Singleton* 2>/dev/null || true
+
 # Set default values for postgres connection if not provided
 POSTGRES_HOST=${POSTGRES_HOST:-postgres}
 POSTGRES_PORT=${POSTGRES_PORT:-5432}
