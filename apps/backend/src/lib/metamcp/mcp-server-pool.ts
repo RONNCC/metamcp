@@ -1541,20 +1541,17 @@ export class McpServerPool {
     try {
       const sessionLifetime = await configService.getSessionLifetime();
 
-      // If session lifetime is null, sessions are infinite - skip cleanup
-      if (sessionLifetime === null) {
-        return;
-      }
-
       const now = Date.now();
       const expiredSessionIds: string[] = [];
 
-      // Find expired sessions
-      for (const [sessionId, timestamp] of Object.entries(
-        this.sessionTimestamps,
-      )) {
-        if (now - timestamp > sessionLifetime) {
-          expiredSessionIds.push(sessionId);
+      // Find expired sessions if lifetime configured
+      if (sessionLifetime !== null) {
+        for (const [sessionId, timestamp] of Object.entries(
+          this.sessionTimestamps,
+        )) {
+          if (now - timestamp > sessionLifetime) {
+            expiredSessionIds.push(sessionId);
+          }
         }
       }
 
@@ -1567,6 +1564,19 @@ export class McpServerPool {
         await Promise.allSettled(
           expiredSessionIds.map((sessionId) => this.cleanupSession(sessionId)),
         );
+      }
+
+      // Proactive capacity check to avoid pool exhaustion (100/100 limit deadlock)
+      const total = this.getTotalConnectionCount();
+      const highWatermark = Math.floor(this.maxTotalConnections * 0.75);
+      if (total >= highWatermark) {
+        logger.warn(
+          `Pool total connections (${total}) exceeds high watermark (${highWatermark}/${this.maxTotalConnections}); running proactive idle eviction`,
+        );
+        // Evict surplus idle sessions down to safe headroom
+        while (this.getTotalConnectionCount() > highWatermark && Object.keys(this.idleSessions).length > 0) {
+          await this.evictOneForCapacity("proactive-reaper");
+        }
       }
     } catch (error) {
       logger.error("Error during automatic session cleanup:", error);
