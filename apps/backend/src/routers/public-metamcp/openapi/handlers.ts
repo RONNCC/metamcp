@@ -26,11 +26,16 @@ import {
   ListToolsHandler,
   MetaMCPHandlerContext,
 } from "../../../lib/metamcp/metamcp-middleware/functional-middleware";
+import { createRetiredToolMiddleware } from "../../../lib/metamcp/metamcp-middleware/retired-tool.functional";
+import { createTimeoutHintMiddleware } from "../../../lib/metamcp/metamcp-middleware/timeout-hint.functional";
 import {
   createToolOverridesCallToolMiddleware,
   createToolOverridesListToolsMiddleware,
 } from "../../../lib/metamcp/metamcp-middleware/tool-overrides.functional";
-import { isRecoverableBackendError } from "../../../lib/metamcp/session-error";
+import {
+  isRecoverableBackendError,
+  isToolCallReplaySafeError,
+} from "../../../lib/metamcp/session-error";
 import { acquireSessionWithBoundedWarmup } from "../../../lib/metamcp/tool-call-warmup";
 import { sanitizeName } from "../../../lib/metamcp/utils";
 
@@ -322,7 +327,17 @@ export const createOriginalCallToolHandler = (): CallToolHandler => {
       // session via the pool, retry once. Logs are tagged "OpenAPI
       // bridge" so operators can split this recovery from the
       // Streamable-HTTP one when investigating.
-      if (!isRecoverableBackendError(error)) {
+      //
+      // The retry is gated on isToolCallReplaySafeError, NOT the
+      // isRecoverableBackendError the tools/list path above uses: a
+      // tools/call is replayed only when the failure proves the backend
+      // never ran it (HTTP 404 "Session not found", or a transport closed
+      // before the send). A timeout, a mid-call drop or a 5xx surfaces
+      // with no replay, because the backend may already have executed a
+      // non-idempotent tool and a second send runs it twice. Found while
+      // investigating the 2026-09-30 client-side duplicate; same rule as
+      // metamcp-proxy.ts.
+      if (!isToolCallReplaySafeError(error)) {
         logger.error(
           `Error calling tool ${JSON.stringify(name)} through ${
             targetSession.client.getServerVersion()?.name || "unknown"
@@ -435,12 +450,22 @@ export const createMiddlewareEnabledHandlers = (
     // servers with the same credentials, so both have to be recorded the same
     // way for retention on this table to mean anything.
     createAuditingMiddleware(),
+    // Second, outside the filter, as in the Streamable-HTTP chain: a call that
+    // already failed as an unknown tool gets the retired-tool map's answer.
+    // The bridge routes by server prefix only, so a retired name on a live
+    // server reaches the backend and comes back as an isError "Unknown tool";
+    // this turns that into a redirect (surfaced as the bridge's usual 403 body).
+    createRetiredToolMiddleware(),
     createFilterCallToolMiddleware({
       cacheEnabled: true,
       customErrorMessage: (toolName, reason) =>
         `Access denied to tool "${toolName}": ${reason}`,
     }),
     createToolOverridesCallToolMiddleware({ cacheEnabled: true }),
+    // Innermost: added text on the gateway's own -32001 timeout (the outcome is
+    // unknown, read the target's state before retrying), same code and data. The bridge
+    // maps a thrown error to a 500 whose message carries it.
+    createTimeoutHintMiddleware(),
     // Add more middleware here as needed
     // createAuthorizationMiddleware(),
   )(originalCallToolHandler);

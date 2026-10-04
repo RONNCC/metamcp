@@ -74,7 +74,7 @@ Grouped by the property they defend. Every entry maps to one or more fork PRs do
 
 ### Session survival across restarts
 
-- **Session-lost and transport-lost recovery** — detectors that recognize the many wrap shapes of a dead backend session (`-32600 "Session not found"`) or a dead transport (`"Not connected"`), walking `.cause` chains and nested envelopes, wired into every proxy call site (tools/call, dynamic-find, aggregate list handlers, and the OpenAPI bridge). Recovery invalidates the stale pooled connection and retries once, transparently.
+- **Session-lost and transport-lost recovery** — detectors that recognize the many wrap shapes of a dead backend session (`-32600 "Session not found"`) or a dead transport (`"Not connected"`), walking `.cause` chains and nested envelopes, wired into every proxy call site (tools/call, dynamic-find, aggregate list handlers, and the OpenAPI bridge). Recovery invalidates the stale pooled connection and retries once, transparently. A tool call is retried only when the failure proves the backend never ran it (an HTTP 404 "Session not found" answer, or a transport closed before the send); a timeout or a connection dropped mid-call reaches the client instead, so the gateway does not re-send a call that may already have executed.
 - **Lazy session recovery across gateway restarts** — session metadata is persisted to an `mcp_sessions` table on init (session id, namespace, endpoint, hashed auth principal, init params). After the gateway restarts with an empty in-memory pool, a returning client's cached `Mcp-Session-Id` is re-validated against the table in constant time, the transport is rebuilt, and the request is replayed — including replaying the MCP `initialize` handshake so the rebuilt transport is actually usable.
 - **`boot_id` + `capability_hash` recovery gating** — recovery is allowed only when the gateway's advertised capability set is unchanged since the session was created. A frozen capability object is both declared on the server and hashed; a matching hash means recovery is safe, a differing hash forces a clean re-init. This prevents handing a client a transport whose negotiated capabilities are stale.
 - **Auto-nuke stale sessions on capability change** — on the first boot after a capability change, rows whose `capability_hash` no longer matches are deleted in one pass, so a capability-changing deploy surfaces the client re-init path at most once instead of wedging sessions indefinitely.
@@ -101,7 +101,7 @@ Grouped by the property they defend. Every entry maps to one or more fork PRs do
 ### Observability
 
 - **`/health/upstream` rollup** — a health endpoint reporting per-backend reachability and pool config, truthful for down HTTP/SSE backends (which never trip the STDIO crash breaker).
-- **Live Logs with consumer identity + tool-call auditing** — the Live Logs view records connection, tool-call, client-session, and server events with categories and filters; every proxied `tools/call` is audited with the authenticated caller (API-key name or OAuth email), tool, backend, duration, and outcome. A persistent `tool_call_audit` table stores a hash of arguments (never the raw args) with configurable retention.
+- **Live Logs with consumer identity + tool-call auditing** — the Live Logs view records connection, tool-call, client-session, and server events with categories and filters; every proxied `tools/call` is audited with the authenticated caller (API-key name or OAuth email), tool, backend, duration, and outcome. A persistent `tool_call_audit` table stores a hash of arguments with configurable retention. Argument values are never stored, with one deliberate exception: the value of six allowlisted selector keys (`mode`, `action`, `profile`, `operation`, `entity`, `method`) when it is a short identifier. The argument key names are stored too (`args_shape`), so "which mode, which parameters" friction is queryable per consumer. A tool's structured in-band refusal (an `error` envelope on a result with `isError` unset) is recorded as a failure too, with the tool's own code token in `error_detail`; see [Audit outcome classes](#audit-outcome-classes).
 - **Durable gateway event history** — the Live Logs page has a **History** mode backed by a persistent `gateway_events` table, so connection, client-session, server and system activity survives a restart instead of living only in a 2000-entry in-memory buffer. Browsable by time range, category, level, server, client and message substring, with keyset paging. Rows are **immutable for 30 days** at the database level (UPDATE and TRUNCATE are refused at any age; DELETE is refused inside the window), and age out after `GATEWAY_EVENTS_RETENTION_DAYS`.
 
 ### No-reboot tool updates
@@ -196,8 +196,8 @@ table created by a future migration starts out fully writable by the runtime rol
 append-only table must be added to the revoke list in `scripts/ensure-runtime-role.sh`; a test
 asserts that every table a migration protects with an immutability trigger appears there.
 
-See [`UMBRELLA_FORK.md`](UMBRELLA_FORK.md) for the per-change record, and [`SECURITY.md`](SECURITY.md)
-to report an issue. Several of these items apply to upstream unchanged; we coordinate them privately
+See [`UMBRELLA_FORK.md`](UMBRELLA_FORK.md) for the per-change record. Report a security weakness through
+[`SECURITY.md`](SECURITY.md), and anything else through [GitHub Issues](https://github.com/Umbrella-IT-Group/metamcp/issues). Several of these items apply to upstream unchanged; we coordinate them privately
 with the upstream maintainers before any public detail.
 
 ## Where we diverged from upstream
@@ -236,7 +236,7 @@ Upstream community resources (Discord, docs, DeepWiki) live at [`metatool-ai/met
 docker pull ghcr.io/umbrella-it-group/metamcp:latest
 ```
 
-Wire it into your own `docker-compose.yml` alongside a Postgres instance. The image is amd64 and published on every push to `umbrella`.
+Wire it into your own `docker-compose.yml` alongside a Postgres instance. The image is amd64, public (no registry login needed), and published when a push to `umbrella` changes a path watched by [the build workflow](.github/workflows/umbrella-build.yml). If the pull is denied, please [open an issue](https://github.com/Umbrella-IT-Group/metamcp/issues) with the exact error text, with secrets and internal hostnames redacted.
 
 ### Build from source with Docker Compose
 
@@ -301,6 +301,12 @@ Better-auth's own rate limiter stays pinned off and should not be enabled instea
 
 A refusal is a `429` with a `Retry-After` and writes no audit row (a row per refusal would amplify the writes being bounded); it is reported to the log instead, at most one line a minute, carrying a running total since startup.
 
+#### Per-credential session ceiling
+
+`MCP_MAX_SESSIONS_PER_CREDENTIAL` (default `100`, `0` disables) bounds how many concurrent MCP sessions one credential may hold; a credential at the limit gets a `429` on its next `initialize`. Past 80% the gateway logs `Concurrent-session usage high for <method> credential "<name>": N/M live sessions`, and at the limit `Concurrent-session ceiling reached ...`, plus a throttled `client` gateway event.
+
+Those lines now end with a short clause saying what is filling the credential, for example `live: autotask=21, itglue=21, ninja=21 (top 5 of 14 endpoints); in-flight 187, idle 113, oldest idle 1710s`: sessions per endpoint (highest first, at most five names), how many hold a request in flight (an open stream counts) versus idle, and how long the quietest idle one has been silent. Sessions the idle sweeper does not track (SSE) are counted as `untracked`. A mostly-idle, old set means abandoned sessions from a client that never closes them; a mostly in-flight set means open streams. The clause carries counts and endpoint names only, never a session id or a token, is bounded to about 180 characters, is built only when a credential is approaching or at the ceiling, and cannot affect the admission decision (a fault building it just leaves the line without the clause).
+
 ### OAuth and session lifetimes
 
 | Variable | Default | Purpose |
@@ -331,12 +337,60 @@ A refusal is a `429` with a `Retry-After` and writes no audit row (a row per ref
 |---|---|---|
 | `LOG_MAX_SIZE_MB` | `50` | In-container log-file rotation threshold. |
 | `TOOL_AUDIT_RETENTION_DAYS` | `90` | `tool_call_audit` retention. `0` or negative keeps rows forever (pruning is skipped entirely). Values `1`-`29` are raised to `30` at boot with a warning, because migration `0032` makes rows undeletable inside a 30-day window. |
+| `TOOL_AUDIT_ARGS_SHAPE` | on | Records `tool_call_audit.args_shape` (migration `0039`): only the top-level argument key names this proxy's own final tools/list inputSchema declares (other keys are counted, never named). Snapshots are isolated per proxy, replaced after listing and invalidated on list_changed; unlisted paths, including the OpenAPI bridge, store counts only. Six allowlisted selector keys store their value only when the schema declares an enum or const and the value is a member (and at most 32 identifier characters); a non-member or an unsupported reference or composition stores `?`, and a selector with no enum or const stores `*` (sent, value not from a closed set, so not recorded). Schemas over 256 properties and listings over 5,000 tools store counts only; selector value collections over 256 entries store a marker. No other argument value is recorded. `off`, `false` or `0` stores NULL instead. Rows are write-once, so a wrong shape cannot be corrected afterwards; this is the kill switch. |
+| `TOOL_AUDIT_INBAND_CLASSIFY` | on | Classifies a tool's in-band refusal as a failure in `tool_call_audit` (`success=false`, `error_code='inband_error'`, the tool's code in `error_detail`). `off`, `false` or `0` disables that step only; `isError`, unknown-tool and retired-name handling keep working. Rows are write-once, so this is the kill switch for a misclassification. |
+| `RETIRED_TOOLS_FILE` | unset | Path of the retired-tool map (JSON). Unset means the redirect is inert and the filesystem is never touched. See [Retired-tool redirect](#retired-tool-redirect). |
+| `RETIRED_TOOLS_RELOAD_SECONDS` | `30` | How often the map file is re-checked, on the failure path only (clamped to 5-3600; an invalid value falls back to 30 with a warning). |
 | `GATEWAY_EVENTS_RETENTION_DAYS` | `90` | `gateway_events` retention. Floor-clamped to 30 with a boot warning: rows are immutable for their first 30 days at the database level, so a lower value cannot take effect. There is no "keep forever" value. Reclaiming in-window space is a deliberate break-glass act, not a config change — see below. |
 | `AUDIT_STORAGE_CHECK_INTERVAL_SWEEPS` | `12` | How many 5-minute cleanup sweeps between audit-table storage checks, so the default is hourly. Values below `1` fall back to the default and anything above `288` (24h) is capped, both with a boot warning: there is deliberately no value that turns the check off. The per-check reading is logged at INFO, so it only reaches stdout (and therefore a log shipper) when `LOG_LEVEL` is `info` or `all`; see the note below. |
 | `AUDIT_STORAGE_WARN_MB` | `2048` | Per-table size at which the storage check escalates from an INFO line to a WARN plus a `system` event in the gateway history. At most one warning per table per 24h while the condition lasts; a table falling below 90% of the threshold re-arms it. Capped at `1048576` (1 TiB) with a boot warning, so a threshold nothing can reach cannot be used as an off switch. |
 | `TOOLS_SWEEP_INTERVAL_SECONDS` | `60` | Periodic tool-definition drift sweep (`0` disables). |
 | `PUBLIC_SESSION_TTL_SECONDS` | `86400` (24h) | Idle-time TTL for public StreamableHTTP sessions before reap. |
 | `SESSION_SWEEP_INTERVAL_SECONDS` | `300` | Public-session sweeper interval (`0` disables). |
+
+#### Audit outcome classes
+
+`tool_call_audit.success` and `error_code` describe the outcome of a proxied `tools/call`. The classifier only reads the result; it never changes what the client receives (the middleware returns the same object).
+
+| `error_code` | Meaning |
+|---|---|
+| `NULL` (`success=true`) | The call returned a result with no failure signal. |
+| `tool_error` | The result has `isError: true`. `error_detail` carries the tool's code token when the body is an envelope, or `validation` for an argument-validation refusal. |
+| `inband_error` | `isError` is unset but the top level of the result's envelope reports a refusal: `error` is `true`, a non-blank string or a non-empty object, or `status` is `failed` or `partial`, or `partial` is `true`. `error_detail` is the tool's code token (a lowercase snake_case code under 48 characters with no id in it), or a fixed marker (`status_failed`, `partial`), or NULL. |
+| `unknown_tool` | The call named a tool nobody serves: the gateway's own `Unknown tool` error, a backend's not-found answer, or the filter's unresolved-server denial. |
+| `tool_retired` | The retired-tool redirect answered (see [Retired-tool redirect](#retired-tool-redirect)). |
+| anything else | A thrown protocol error: its numeric code (for example `-32001` for a timeout) or its class name. |
+
+The in-band rule inspects the TOP LEVEL only. `error` absent, `null`, `false`, an empty string, a number or an empty collection is a success (a tool may return `error: null` on every success). Nested keys are never read, so a section that degraded inside a good result, a write's failed read-back object and per-item failures inside a list do not mark the call failed. A refusal carried only by `ok: false`, `warning` or `note` is a known false negative.
+
+`success` changed meaning at the deploy that introduced `inband_error`: earlier rows recorded such refusals as `success=true` and cannot be reclassified (rows are write-once). Compare failure rates across that date with care.
+
+The Live Logs line for an in-band refusal is `<tool> refused in-band: <detail> (<ms>ms)` at level `warn`, deliberately worded without the words that log-based error panels count.
+
+#### Retired-tool redirect
+
+A client that cached an old tool list, or an automation node that still names a removed tool, calls a name nobody serves and gets a bare `Unknown tool`. When `RETIRED_TOOLS_FILE` points at a map file, the gateway answers such a call with what replaced the tool instead:
+
+```json
+{ "error": true, "code": "tool_retired",
+  "message": "<server>__<tool> was retired on 2026-09-02 and is no longer served. Use <server>__<replacement>(mode=\"x\"). Refresh your tool list (tools/list) if your client cached an older one.",
+  "context": { "retired": "...", "since": "...", "replacement": "...", "replacement_call": "...", "also": [], "skill": "...", "hint": "..." } }
+```
+
+It is returned as an `isError` result with no `structuredContent` (a client validating that against a cached output schema would otherwise turn the message into a validation failure). Over the OpenAPI bridge it surfaces as the bridge's usual `403` body. One status change to know about: a name in the map that the bridge handler itself throws as `Unknown tool` (no server with that prefix any more) used to answer `404 "Tool not found"` and now answers this `403` redirect, because the redirect is an `isError` result. A name outside the map keeps the `404`, and a backend's own not-found answer was already a `403`.
+
+Properties that make it safe to run in front of live automation:
+
+- **Failure-gated.** The map is consulted only AFTER a call has already failed as an unknown tool: the gateway's own `Unknown tool` throw, a backend's not-found answer for a name the gateway still routes to it, or the filter's fail-closed denial for a server prefix that no longer resolves. A call that succeeds, and every other failure (timeouts, broker errors, validation refusals), passes through untouched with zero lookups. A map entry therefore cannot shadow a live tool; a wrong or stale entry degrades to the old bare error.
+- **Executes nothing.** The redirect forwards nothing and is not an alias: the old name still does not answer.
+- **Data only, fail open.** The file never influences routing or access. A missing, unreadable or invalid file keeps the last good map (or none) and logs one warning per five minutes. An entry that fails validation is dropped alone with a warning naming it; a wrong version, a non-object root, a file over 262144 bytes or more than 500 entries rejects the file.
+- **Recorded.** The audit row is `error_code='tool_retired'` (`success=false`), so retired-name traffic by consumer is one SQL query even when the caller swallows the failure.
+
+File format (version 1): `{"version": 1, "retired": {"<server>__<tool>": {"since": "YYYY-MM-DD", "replacement": "<server>__<tool>" | null, "args": {"mode": "..."}, "call": "...", "also": ["<server>__<tool>"], "skill": "...", "hint": "..."}}}`. `since` is required and must be a real, non-future date; at least one of `replacement`, `also`, `skill` or `hint` is required. Limits: `args` up to 4 keys (`[a-z_]{1,24}` to `[A-Za-z0-9_|.-]{1,80}`), `call` 160 characters, `also` 4 names, `skill` 80, `hint` 280, no control characters. Mount the file's DIRECTORY read-only rather than the file itself: replacing a checked-out file replaces its inode, and a single-file bind mount would keep serving the old content.
+
+#### Timeout adjudication hint
+
+When a `tools/call` times out (`-32001`), the client now receives the same error with added text: the outcome is unknown (the tool may have applied the change, partly applied it, or still be finishing), and for a tool that changes anything the caller should read the target's current state before retrying. The text names no actor and no duration, because a backend can raise the same `-32001` with the same data shape (Sol review, 2026-10-02). The MCP SDK client does send `notifications/cancelled` on a timeout and a Python SDK backend acts on it, but whether the cancel landed before, during or after the work cannot be known at the gateway, so the text claims neither "cancelled" nor "not cancelled" (an earlier wording said the call was not cancelled, which was false). Errors with either SDK timeout message and its numeric `data.timeout` or `data.maxTotalTimeout` shape are annotated, including backend-raised errors with that shape; an unknown-session `-32001` remains unchanged. The call is still never re-sent by the gateway.
 
 **Break-glass on `gateway_events` and `tool_call_audit`.** Both carry the same 30-day window (migrations `0031` and `0032`), so the same rules apply to each. Nothing in the application can delete a row inside that window, and that includes the retention sweepers: a `DELETE` that touches even one in-window row raises, and the raise rolls back the entire statement, so a mixed-range prune reclaims nothing rather than partially succeeding. That rollback is why both retention variables are floor-clamped rather than trusted: an under-range setting would stop pruning altogether instead of shortening it. Reclaiming space early therefore requires a superuser at the database — `ALTER TABLE <table> DISABLE TRIGGER <table>_no_recent_delete`, or `SET session_replication_role = 'replica'` for the session — and re-enabling afterwards. Treat that as an audit-worthy act: it is the one operation that can remove evidence these tables exist to preserve, it leaves no trace in the table itself, and the ordinary answer to a full disk is to lower the retention variable toward its floor and wait for the window to pass.
 
@@ -459,7 +513,7 @@ sequenceDiagram
 
 ## Contributing and upstreaming
 
-Contributions welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md). PRs target `umbrella`, squash-merged after review and gates.
+Contributions welcome. Bugs and feature requests go to [GitHub Issues](https://github.com/Umbrella-IT-Group/metamcp/issues), questions to [Discussions](https://github.com/Umbrella-IT-Group/metamcp/discussions), and security reports through [`SECURITY.md`](SECURITY.md). [`CONTRIBUTING.md`](CONTRIBUTING.md) covers the development setup and the pull request flow: PRs target `umbrella` and are squash-merged after review and gates.
 
 When a patch is generic (a bug fix or config option that isn't Umbrella-specific), branch off `main`, open it against `metatool-ai/metamcp`, and once merged upstream we drop our private carry. [`UMBRELLA_FORK.md`](UMBRELLA_FORK.md) tracks the full cherry-pick log, which of our patches converged upstream, and the upstreaming backlog.
 
