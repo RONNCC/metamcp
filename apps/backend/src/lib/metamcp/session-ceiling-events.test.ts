@@ -44,6 +44,32 @@ const approaching = (): CeilingDecision => ({
   approaching: true,
 });
 
+const evicted = (): CeilingDecision => ({
+  allowed: true,
+  current: 300,
+  ceiling: 300,
+  approaching: true,
+  eviction: {
+    purpose: "admission",
+    endpointName: "ninja",
+    idleSeconds: 1710,
+    teardownWait: Promise.resolve(),
+    release: () => {},
+  },
+});
+
+/** The same eviction, made by a lazy recovery rather than an initialize. */
+const evictedForRecovery = (): CeilingDecision => ({
+  ...evicted(),
+  eviction: {
+    purpose: "recovery",
+    endpointName: "ninja",
+    idleSeconds: 1710,
+    teardownWait: Promise.resolve(),
+    release: () => {},
+  },
+});
+
 const belowThreshold = (): CeilingDecision => ({
   allowed: true,
   current: 40,
@@ -317,5 +343,152 @@ describe("recordSessionCeilingEvent — the live summary", () => {
     expect(recordMock.mock.calls[0][0].message).toBe(
       "session refused: concurrent-session ceiling reached (101/100)",
     );
+  });
+});
+
+describe("recordSessionCeilingEvent — evictions", () => {
+  it("emits an info-level evicted event naming the victim's endpoint and idle time", () => {
+    recordSessionCeilingEvent({
+      identity: identityA,
+      endpointName: "ep-1",
+      label: "cowork workspace",
+      decision: evicted(),
+    });
+
+    expect(recordMock).toHaveBeenCalledTimes(1);
+    const entry = recordMock.mock.calls[0][0];
+    expect(entry.category).toBe("client");
+    expect(entry.serverName).toBe("ep-1");
+    // Nothing was turned away, so a refusal stays the only warn-level outcome.
+    expect(entry.level).toBe("info");
+    expect(entry.clientName).toBe("cowork workspace");
+    expect(entry.message).toBe(
+      "idle session evicted to admit a new session at the concurrent-session ceiling (300/300): ninja, idle 1710s",
+    );
+  });
+
+  it("an eviction made by a lazy recovery says it admitted a recovered session, never a new one", () => {
+    recordSessionCeilingEvent({
+      identity: identityA,
+      endpointName: "ep-1",
+      label: "cowork workspace",
+      decision: evictedForRecovery(),
+    });
+
+    expect(recordMock).toHaveBeenCalledTimes(1);
+    const entry = recordMock.mock.calls[0][0];
+    expect(entry.level).toBe("info");
+    expect(entry.message).toBe(
+      "idle session evicted to admit a recovered session at the concurrent-session ceiling (300/300): ninja, idle 1710s",
+    );
+    expect(entry.message).not.toContain("new session");
+  });
+
+  it("an admission's and a recovery's evictions share one throttle window", () => {
+    recordSessionCeilingEvent({
+      identity: identityA,
+      endpointName: "ep-1",
+      decision: evicted(),
+    });
+    recordSessionCeilingEvent({
+      identity: identityA,
+      endpointName: "ep-1",
+      decision: evictedForRecovery(),
+    });
+    expect(recordMock).toHaveBeenCalledTimes(1);
+
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(Date.now() + SESSION_CEILING_EVENT_INTERVAL_MS + 1);
+      recordSessionCeilingEvent({
+        identity: identityA,
+        endpointName: "ep-1",
+        decision: evictedForRecovery(),
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(recordMock).toHaveBeenCalledTimes(2);
+    expect(recordMock.mock.calls[1][0].message).toBe(
+      "idle session evicted to admit a recovered session at the concurrent-session ceiling (300/300): ninja, idle 1710s " +
+        "(1 more evictions suppressed in the last 60s)",
+    );
+  });
+
+  it("is an eviction, not an approaching warning, even though the credential is past 80%", () => {
+    recordSessionCeilingEvent({
+      identity: identityA,
+      endpointName: "ep-1",
+      decision: evicted(),
+    });
+    expect(recordMock.mock.calls[0][0].message).not.toContain("approaching");
+  });
+
+  it("collapses a burst of evictions into one event and folds the count into the next", () => {
+    for (let i = 0; i < 16; i += 1) {
+      recordSessionCeilingEvent({
+        identity: identityA,
+        endpointName: "ep-1",
+        decision: evicted(),
+      });
+    }
+    expect(recordMock).toHaveBeenCalledTimes(1);
+
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(Date.now() + SESSION_CEILING_EVENT_INTERVAL_MS + 1);
+      recordSessionCeilingEvent({
+        identity: identityA,
+        endpointName: "ep-1",
+        decision: { ...evicted(), liveSummary: "live: ninja=300; idle 300" },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(recordMock).toHaveBeenCalledTimes(2);
+    expect(recordMock.mock.calls[1][0].message).toBe(
+      "idle session evicted to admit a new session at the concurrent-session ceiling (300/300): ninja, idle 1710s " +
+        "(15 more evictions suppressed in the last 60s); live: ninja=300; idle 300",
+    );
+  });
+
+  it("throttles evictions separately from refusals and approaching warnings", () => {
+    recordSessionCeilingEvent({
+      identity: identityA,
+      endpointName: "ep-1",
+      decision: refused(),
+    });
+    recordSessionCeilingEvent({
+      identity: identityA,
+      endpointName: "ep-1",
+      decision: approaching(),
+    });
+    recordSessionCeilingEvent({
+      identity: identityA,
+      endpointName: "ep-1",
+      decision: evicted(),
+    });
+    // A repeat of the eviction inside the window is collapsed...
+    recordSessionCeilingEvent({
+      identity: identityA,
+      endpointName: "ep-1",
+      decision: evicted(),
+    });
+    // ...but another credential's first eviction is not hidden by it.
+    recordSessionCeilingEvent({
+      identity: identityB,
+      endpointName: "ep-1",
+      decision: evicted(),
+    });
+
+    expect(recordMock).toHaveBeenCalledTimes(4);
+    expect(recordMock.mock.calls.map((call) => call[0].level)).toEqual([
+      "warn",
+      "warn",
+      "info",
+      "info",
+    ]);
   });
 });
