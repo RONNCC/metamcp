@@ -617,156 +617,165 @@ export default function McpServerDetailPage({
             </div>
 
             {/* Configuration */}
-            <div className="rounded-lg border p-6 flex flex-col justify-between">
-              <div>
-                <h3 className="text-lg font-semibold mb-4">
-                  {t("mcp-servers:detail.configuration")}
-                </h3>
-                <div className="space-y-4">
-                  {server.command && (
-                    <div className="space-y-2">
-                      <span className="text-sm font-medium text-muted-foreground">
-                        {t("mcp-servers:detail.command")}:
+            <div className="rounded-lg border p-6">
+              <h3 className="text-lg font-semibold mb-4">
+                {t("mcp-servers:detail.configuration")}
+              </h3>
+              <div className="space-y-4">
+                {server.command && (
+                  <div className="space-y-2">
+                    <span className="text-sm font-medium text-muted-foreground">
+                      {t("mcp-servers:detail.command")}:
+                    </span>
+                    <p className="text-sm font-mono bg-muted p-2 rounded break-all">
+                      {server.command}
+                    </p>
+                  </div>
+                )}
+                {server.args.length > 0 && (
+                  <div className="space-y-2">
+                    <span className="text-sm font-medium text-muted-foreground">
+                      {t("mcp-servers:detail.arguments")}:
+                    </span>
+                    <p className="text-sm font-mono bg-muted p-2 rounded break-all">
+                      {server.args.join(" ")}
+                    </p>
+                  </div>
+                )}
+                {server.url && (
+                  <div className="space-y-2">
+                    <span className="text-sm font-medium text-muted-foreground">
+                      {t("mcp-servers:detail.url")}:
+                    </span>
+                    <p className="text-sm font-mono bg-muted p-2 rounded break-all">
+                      {server.url}
+                    </p>
+                  </div>
+                )}
+                {server.bearerToken && (
+                  <div className="space-y-2">
+                    <span className="text-sm font-medium text-muted-foreground">
+                      {t("mcp-servers:detail.authBearerToken")}:
+                    </span>
+                    <div className="flex items-start gap-2 bg-muted p-2 rounded">
+                      <span className="text-sm font-mono text-muted-foreground flex-1 break-all">
+                        {bearerTokenRevealed
+                          ? server.bearerToken
+                          : maskSensitiveValue(server.bearerToken)}
                       </span>
-                      <p className="text-sm font-mono bg-muted p-2 rounded break-all">
-                        {server.command}
-                      </p>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 w-6 p-0 flex-shrink-0"
+                        onClick={() =>
+                          setBearerTokenRevealed(!bearerTokenRevealed)
+                        }
+                        title={
+                          bearerTokenRevealed
+                            ? t("mcp-servers:detail.hideToken")
+                            : t("mcp-servers:detail.showToken")
+                        }
+                      >
+                        {bearerTokenRevealed ? (
+                          <EyeOff className="h-3 w-3" />
+                        ) : (
+                          <Eye className="h-3 w-3" />
+                        )}
+                      </Button>
                     </div>
-                  )}
-                  {server.args.length > 0 && (
+                  </div>
+                )}
+                {Object.keys(server.headers).length > 0 && (
+                  <div className="space-y-2">
+                    <span className="text-sm font-medium text-muted-foreground">
+                      {t("mcp-servers:detail.customHeaders")}:
+                    </span>
                     <div className="space-y-2">
-                      <span className="text-sm font-medium text-muted-foreground">
-                        {t("mcp-servers:detail.arguments")}:
-                      </span>
-                      <p className="text-sm font-mono bg-muted p-2 rounded break-all">
-                        {server.args.join(" ")}
-                      </p>
+                      {Object.entries(server.headers).map(([key, value]) => {
+                        const isRevealed = revealedHeaders.has(key);
+                        const displayValue = isRevealed
+                          ? value
+                          : maskSensitiveValue(value);
+
+                        return (
+                          <div
+                            key={key}
+                            className="flex items-start gap-2 bg-muted p-2 rounded"
+                          >
+                            <div className="flex-1 min-w-0">
+                              <span className="text-sm font-mono font-medium">
+                                {key}:
+                              </span>
+                              <span className="text-sm font-mono text-muted-foreground ml-2 break-all">
+                                {displayValue}
+                              </span>
+                            </div>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-6 w-6 p-0 flex-shrink-0"
+                              onClick={() => toggleHeaderVisibility(key)}
+                              title={
+                                isRevealed
+                                  ? t("mcp-servers:detail.hideValue")
+                                  : t("mcp-servers:detail.showValue")
+                              }
+                            >
+                              {isRevealed ? (
+                                <EyeOff className="h-3 w-3" />
+                              ) : (
+                                <Eye className="h-3 w-3" />
+                              )}
+                            </Button>
+                          </div>
+                        );
+                      })}
                     </div>
-                  )}
-                  {server.url && (
-                    <div className="space-y-2">
+                  </div>
+                )}
+                {/* Auth status */}
+                {probeError && (
+                  <div className="space-y-2">
+                    <div className="flex justify-between items-center">
                       <span className="text-sm font-medium text-muted-foreground">
-                        {t("mcp-servers:detail.url")}:
+                        Auth:
                       </span>
-                      <p className="text-sm font-mono bg-muted p-2 rounded break-all">
-                        {server.url}
-                      </p>
-                    </div>
-                  )}
-                  {server.bearerToken && (
-                    <div className="space-y-2">
-                      <span className="text-sm font-medium text-muted-foreground">
-                        {t("mcp-servers:detail.authBearerToken")}:
-                      </span>
-                      <div className="flex items-start gap-2 bg-muted p-2 rounded">
-                        <span className="text-sm font-mono text-muted-foreground flex-1 break-all">
-                          {bearerTokenRevealed
-                            ? server.bearerToken
-                            : maskSensitiveValue(server.bearerToken)}
-                        </span>
+                      <div className="flex items-center gap-2">
+                        <Badge variant="destructive">
+                          {t("mcp-servers:detail.error")}
+                        </Badge>
                         <Button
-                          variant="ghost"
+                          variant="outline"
                           size="sm"
-                          className="h-6 w-6 p-0 flex-shrink-0"
-                          onClick={() =>
-                            setBearerTokenRevealed(!bearerTokenRevealed)
-                          }
-                          title={
-                            bearerTokenRevealed
-                              ? t("mcp-servers:detail.hideToken")
-                              : t("mcp-servers:detail.showToken")
-                          }
+                          className="h-6 px-2 text-xs"
+                          onClick={() => setProbeVersion((v) => v + 1)}
                         >
-                          {bearerTokenRevealed ? (
-                            <EyeOff className="h-3 w-3" />
-                          ) : (
-                            <Eye className="h-3 w-3" />
-                          )}
+                          <RefreshCw className="h-3 w-3 mr-1" />
+                          {t("mcp-servers:detail.retry")}
                         </Button>
                       </div>
                     </div>
-                  )}
-                  {Object.keys(server.headers).length > 0 && (
-                    <div className="space-y-2">
+                    <p className="text-sm font-mono bg-destructive/10 text-destructive p-2 rounded break-all">
+                      Auth probe failed: {probeError}
+                    </p>
+                  </div>
+                )}
+                {probe && (
+                  <div className="space-y-2">
+                    <div className="flex justify-between items-center">
                       <span className="text-sm font-medium text-muted-foreground">
-                        {t("mcp-servers:detail.customHeaders")}:
+                        Auth:
                       </span>
-                      <div className="space-y-2">
-                        {Object.entries(server.headers).map(([key, value]) => {
-                          const isRevealed = revealedHeaders.has(key);
-                          const displayValue = isRevealed
-                            ? value
-                            : maskSensitiveValue(value);
-
-                          return (
-                            <div
-                              key={key}
-                              className="flex items-start gap-2 bg-muted p-2 rounded"
-                            >
-                              <div className="flex-1 min-w-0">
-                                <span className="text-sm font-mono font-medium">
-                                  {key}:
-                                </span>
-                                <span className="text-sm font-mono text-muted-foreground ml-2 break-all">
-                                  {displayValue}
-                                </span>
-                              </div>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                className="h-6 w-6 p-0 flex-shrink-0"
-                                onClick={() => toggleHeaderVisibility(key)}
-                                title={
-                                  isRevealed
-                                    ? t("mcp-servers:detail.hideValue")
-                                    : t("mcp-servers:detail.showValue")
-                                }
-                              >
-                                {isRevealed ? (
-                                  <EyeOff className="h-3 w-3" />
-                                ) : (
-                                  <Eye className="h-3 w-3" />
-                                )}
-                              </Button>
-                            </div>
-                          );
-                        })}
+                      <div className="flex justify-end">
+                        <Badge variant="info">{probe.kind}</Badge>
                       </div>
                     </div>
-                  )}
-                </div>
+                    <p className="text-sm font-mono bg-muted p-2 rounded break-all text-muted-foreground">
+                      {probe.guidance}
+                    </p>
+                  </div>
+                )}
               </div>
-
-              {/* Auth status: bottom right */}
-              {(probe || probeError) && (
-                <div className="mt-6 pt-4 border-t flex justify-end">
-                  {probeError && (
-                    <div className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-1.5 text-xs text-muted-foreground flex items-center gap-2">
-                      <span className="font-medium text-destructive">
-                        Auth probe failed: {probeError}
-                      </span>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="h-6 px-2 text-xs"
-                        onClick={() => setProbeVersion((v) => v + 1)}
-                      >
-                        <RefreshCw className="h-3 w-3 mr-1" />
-                        {t("mcp-servers:detail.retry")}
-                      </Button>
-                    </div>
-                  )}
-                  {probe && (
-                    <div className="rounded-md border bg-muted/40 px-3 py-1.5 text-xs text-muted-foreground text-right max-w-sm">
-                      <span className="font-medium text-foreground">
-                        Auth: {probe.kind}
-                      </span>
-                      {" — "}
-                      <span>{probe.guidance}</span>
-                    </div>
-                  )}
-                </div>
-              )}
             </div>
 
             {/* Environment Variables */}
