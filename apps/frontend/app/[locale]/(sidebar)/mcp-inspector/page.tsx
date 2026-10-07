@@ -100,6 +100,8 @@ function McpInspectorContent() {
     enabled: Boolean(selectedServer && !serversLoading && selectedServerUuid),
   });
 
+  const lastConnectedUuidRef = React.useRef<string | null>(null);
+
   // Handle server connection logic and notifications
   React.useEffect(() => {
     // Clear notifications when switching servers
@@ -108,12 +110,18 @@ function McpInspectorContent() {
     // Auto-connect when hook is enabled and not already connected
     if (connection && selectedServer && !serversLoading && selectedServerUuid) {
       if (connection.connectionStatus === "connected") {
-        // If we're connected but to a different server, disconnect first
-        connection.disconnect().then(() => {
-          connection.connect();
-        });
+        // Only reconnect if we actually switched to a different server.
+        // `selectedServer` and `servers` receive new object references on
+        // background query refetches, which must not trigger disconnect/reconnect.
+        if (lastConnectedUuidRef.current !== selectedServerUuid) {
+          connection.disconnect().then(() => {
+            lastConnectedUuidRef.current = selectedServerUuid;
+            connection.connect();
+          });
+        }
       } else if (connection.connectionStatus === "disconnected") {
         // Auto-connect when server is selected and not already connected
+        lastConnectedUuidRef.current = selectedServerUuid;
         connection.connect();
       }
     }
